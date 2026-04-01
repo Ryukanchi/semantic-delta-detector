@@ -1,0 +1,30 @@
+{
+  "name": "semantic-delta-detector",
+  "version": "0.1.0",
+  "description": "CLI tool for comparing SQL queries and surfacing semantic differences in business meaning.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "compare": "tsx src/cli.ts",
+    "example": "tsx src/cli.ts --example login-vs-paid",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "bin": {
+    "semantic-delta-detector": "./dist/cli.js"
+  },
+  "keywords": [
+    "sql",
+    "cli",
+    "metrics",
+    "semantic-analysis"
+  ],
+  "license": "MIT",
+  "packageManager": "pnpm@10.0.0",
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

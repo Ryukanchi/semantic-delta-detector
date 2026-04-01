@@ -1,0 +1,144 @@
+import { SemanticComparisonResult } from "../types.js";
+
+function getCategoryLabel(category: string): string {
+  const categoryLabels: Record<string, string> = {
+    source_domain_mismatch: "Source Domain",
+    business_logic_mismatch: "Business Logic",
+    activity_basis_mismatch: "Activity Basis",
+    monetization_mismatch: "Monetization",
+    time_reference_mismatch: "Time Reference",
+    aggregation_mismatch: "Aggregation",
+    metric_intent_mismatch: "Metric Intent",
+    team_context_mismatch: "Team Context",
+    intended_use_mismatch: "Intended Use",
+    description_mismatch: "Description",
+    naming_alignment_mismatch: "Naming Conflict",
+  };
+
+  return categoryLabels[category] || category;
+}
+
+export function formatReadableReport(result: SemanticComparisonResult): string {
+  const differenceLines =
+    result.detected_differences.length === 0
+      ? ["- No meaningful semantic differences detected."]
+      : result.detected_differences.map(
+          (difference) =>
+            `- [${difference.impact.toUpperCase()}] ${getCategoryLabel(difference.category)}: ${difference.description}`,
+        );
+
+  return [
+    "Semantic Delta Report",
+    "=====================",
+    `Metric A: ${result.metric_name_a}`,
+    `Metric B: ${result.metric_name_b}`,
+    `Similarity Score: ${result.semantic_similarity_score}/100`,
+    `Risk Level: ${result.risk_level}`,
+    `Confidence: ${result.confidence_level}`,
+    `Evidence: ${result.evidence_sources.join(", ")}`,
+    "",
+    `Likely Meaning A: ${result.likely_business_meaning_a}`,
+    `Likely Meaning B: ${result.likely_business_meaning_b}`,
+    "",
+    "Key Findings:",
+    ...differenceLines,
+    "",
+    `Explanation: ${result.explanation}`,
+    `Recommendation: ${result.recommendation}`,
+  ].join("\n");
+}
+
+function buildVerdict(result: SemanticComparisonResult): string {
+  if (result.risk_level === "high") {
+    return "HIGH SEMANTIC CONFLICT";
+  }
+
+  if (result.risk_level === "medium") {
+    return "MEANINGFUL DEFINITION DRIFT";
+  }
+
+  return "LOW SEMANTIC RISK";
+}
+
+function buildInterchangeabilityLabel(result: SemanticComparisonResult): string {
+  if (result.semantic_similarity_score < 45) {
+    return "Not safely interchangeable";
+  }
+
+  if (result.semantic_similarity_score < 75) {
+    return "Comparable only with explicit caveats";
+  }
+
+  return "Likely interchangeable";
+}
+
+function buildHeadline(result: SemanticComparisonResult): string {
+  if (result.detected_differences.some((difference) => difference.category === "metric_intent_mismatch")) {
+    return "These queries may look similar, but they do not measure the same business concept.";
+  }
+
+  if (result.risk_level === "high") {
+    return "These query definitions conflict in ways that can change business decisions.";
+  }
+
+  if (result.risk_level === "medium") {
+    return "These query definitions are close, but not identical.";
+  }
+
+  return "These query definitions are closely aligned.";
+}
+
+function buildWhyItMatters(result: SemanticComparisonResult): string {
+  if (
+    result.detected_differences.some((difference) => difference.category === "monetization_mismatch") &&
+    result.detected_differences.some((difference) => difference.category === "activity_basis_mismatch")
+  ) {
+    return "One metric reflects product engagement, while the other mixes activity with monetization. Using them as if they were the same KPI can blur product health, revenue health, and executive reporting.";
+  }
+
+  if (result.risk_level === "high") {
+    return "Different metric definitions here can drive different product, finance, or growth decisions even if the labels sound similar.";
+  }
+
+  if (result.risk_level === "medium") {
+    return "Teams could reach different conclusions unless the metric definition is made explicit.";
+  }
+
+  return "This comparison does not show major semantic conflict.";
+}
+
+export function formatDemoReport(result: SemanticComparisonResult): string {
+  const topFindings = result.detected_differences.slice(0, 3);
+  const findingLines =
+    topFindings.length === 0
+      ? ["- No major semantic conflict detected."]
+      : topFindings.map(
+          (difference) =>
+            `- ${getCategoryLabel(difference.category)}: ${difference.description}`,
+        );
+
+  return [
+    "Semantic Delta Demo",
+    "===================",
+    `Verdict: ${buildVerdict(result)}`,
+    `Interchangeability: ${buildInterchangeabilityLabel(result)}`,
+    `Similarity Score: ${result.semantic_similarity_score}/100`,
+    `Confidence: ${result.confidence_level}`,
+    `Evidence: ${result.evidence_sources.join(", ")}`,
+    "",
+    buildHeadline(result),
+    "",
+    "What Each Query Really Measures",
+    `- Query A (${result.metric_name_a}): ${result.likely_business_meaning_a}`,
+    `- Query B (${result.metric_name_b}): ${result.likely_business_meaning_b}`,
+    "",
+    "Why This Matters",
+    buildWhyItMatters(result),
+    "",
+    "Top Semantic Conflicts",
+    ...findingLines,
+    "",
+    "Recommended Action",
+    result.recommendation,
+  ].join("\n");
+}

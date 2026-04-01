@@ -1,0 +1,7 @@
+{
+  "metric_name": "active_users",
+  "team_context": "finance",
+  "description": "Paying users who were recently active in the last 30 days",
+  "intended_use": "executive revenue reporting",
+  "query": "SELECT COUNT(DISTINCT user_id)\nFROM users\nWHERE subscription_status = 'paid'\nAND last_active >= CURRENT_DATE - INTERVAL '30 days'"
+}

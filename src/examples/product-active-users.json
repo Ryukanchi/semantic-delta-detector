@@ -1,0 +1,7 @@
+{
+  "metric_name": "active_users",
+  "team_context": "product",
+  "description": "Users who logged in during the last 30 days",
+  "intended_use": "product dashboard",
+  "query": "SELECT COUNT(DISTINCT user_id)\nFROM events\nWHERE event = 'login'\nAND event_date >= CURRENT_DATE - INTERVAL '30 days'"
+}
