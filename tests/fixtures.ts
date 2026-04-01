@@ -59,4 +59,24 @@ WHERE subscription_status = 'paid'
 AND last_active >= CURRENT_DATE - INTERVAL '30 days'`,
     },
   },
+  partialMetadata: {
+    inputA: {
+      metric_name: "active_users",
+      description: "Users who logged in during the last 30 days",
+      query: `SELECT COUNT(DISTINCT user_id)
+FROM events
+WHERE event = 'login'
+AND event_date >= CURRENT_DATE - INTERVAL '30 days'`,
+    },
+    inputB: {
+      metric_name: "active_users",
+      description: "Paying users who were recently active in the last 30 days",
+      team_context: "finance",
+      intended_use: "executive revenue reporting",
+      query: `SELECT COUNT(DISTINCT user_id)
+FROM users
+WHERE subscription_status = 'paid'
+AND last_active >= CURRENT_DATE - INTERVAL '30 days'`,
+    },
+  },
 } as const;

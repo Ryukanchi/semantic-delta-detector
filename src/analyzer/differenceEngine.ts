@@ -305,28 +305,57 @@ function compareMetricIntent(
 function deriveEvidenceSources(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
+  profileA: QuerySemanticProfile,
+  profileB: QuerySemanticProfile,
   differences: DetectedDifference[],
 ): EvidenceSource[] {
   const categories = new Set(differences.map((difference) => difference.category));
   const metadataEvidence = new Set<EvidenceSource>();
+  const metadataDimensionA = inferDimensionFromMetadata(inputA);
+  const metadataDimensionB = inferDimensionFromMetadata(inputB);
+  const hasMeaningfulSqlDifference =
+    profileA.primaryDimension !== profileB.primaryDimension ||
+    differences.some((difference) =>
+      [
+        "source_domain_mismatch",
+        "activity_basis_mismatch",
+        "monetization_mismatch",
+        "time_reference_mismatch",
+        "metric_intent_mismatch",
+      ].includes(difference.category),
+    );
 
-  if (
-    categories.has("naming_alignment_mismatch") &&
-    inputA.metric_name &&
-    inputB.metric_name
-  ) {
+  if (inputA.metric_name && inputB.metric_name) {
     metadataEvidence.add("metric_name");
   }
 
-  if (categories.has("description_mismatch") && inputA.description && inputB.description) {
+  if (
+    inputA.description &&
+    inputB.description &&
+    (
+      categories.has("description_mismatch") ||
+      (hasMeaningfulSqlDifference &&
+        metadataDimensionA !== "unknown" &&
+        metadataDimensionB !== "unknown" &&
+        metadataDimensionA !== metadataDimensionB)
+    )
+  ) {
     metadataEvidence.add("description");
   }
 
-  if (categories.has("team_context_mismatch") && inputA.team_context && inputB.team_context) {
+  if (
+    inputA.team_context &&
+    inputB.team_context &&
+    (categories.has("team_context_mismatch") || hasMeaningfulSqlDifference)
+  ) {
     metadataEvidence.add("team_context");
   }
 
-  if (categories.has("intended_use_mismatch") && inputA.intended_use && inputB.intended_use) {
+  if (
+    inputA.intended_use &&
+    inputB.intended_use &&
+    (categories.has("intended_use_mismatch") || hasMeaningfulSqlDifference)
+  ) {
     metadataEvidence.add("intended_use");
   }
 
@@ -346,11 +375,46 @@ function inferConfidenceLevel(
   }
 
   const metadataCount = evidenceSources.filter((source) => source !== "sql").length;
+  if (differences.length === 0) {
+    return metadataCount >= 2 ? "medium" : "low";
+  }
+
   if (metadataCount >= 2) {
     return "high";
   }
 
   return "medium";
+}
+
+function buildMetadataContextNote(
+  inputA: MetricDefinitionInput,
+  inputB: MetricDefinitionInput,
+): string {
+  const fields: Array<{
+    label: string;
+    a: string | undefined;
+    b: string | undefined;
+  }> = [
+    { label: "metric names", a: inputA.metric_name, b: inputB.metric_name },
+    { label: "descriptions", a: inputA.description, b: inputB.description },
+    { label: "team context", a: inputA.team_context, b: inputB.team_context },
+    { label: "intended use", a: inputA.intended_use, b: inputB.intended_use },
+  ];
+
+  const fullyAvailable = fields.filter((field) => field.a && field.b).map((field) => field.label);
+  const partiallyAvailable = fields
+    .filter((field) => (field.a && !field.b) || (!field.a && field.b))
+    .map((field) => field.label);
+
+  if (fullyAvailable.length === 0 && partiallyAvailable.length === 0) {
+    return " No metadata context was provided, so this is based on SQL evidence only.";
+  }
+
+  if (partiallyAvailable.length > 0) {
+    return ` Partial metadata was available. Fully compared: ${fullyAvailable.join(", ") || "none"}. Available on only one side: ${partiallyAvailable.join(", ")}.`;
+  }
+
+  return " Full metadata context was available for both inputs.";
 }
 
 function buildExplanation(
@@ -363,27 +427,16 @@ function buildExplanation(
   confidenceLevel: ConfidenceLevel,
   evidenceSources: EvidenceSource[],
 ): string {
-  const missingMetadata = [
-    !inputA.metric_name || !inputB.metric_name ? "metric names" : null,
-    !inputA.description || !inputB.description ? "descriptions" : null,
-    !inputA.team_context || !inputB.team_context ? "team context" : null,
-    !inputA.intended_use || !inputB.intended_use ? "intended use" : null,
-  ].filter(Boolean) as string[];
-
   const evidenceNote =
     evidenceSources.includes("sql_only")
       ? "This is a heuristic warning based on SQL structure alone, so confidence is more limited."
       : `Confidence is ${confidenceLevel} because the SQL signal is supported by ${evidenceSources
           .filter((source) => source !== "sql")
           .join(", ")} metadata.`;
-
-  const missingMetadataNote =
-    missingMetadata.length > 0
-      ? ` Missing context: ${missingMetadata.join(", ")}.`
-      : "";
+  const metadataContextNote = buildMetadataContextNote(inputA, inputB);
 
   if (differences.length === 0) {
-    return `These definitions are close enough to support the same business interpretation. They use similar logic, time framing, and metric intent. ${evidenceNote}${missingMetadataNote}`;
+    return `These definitions are close enough to support the same business interpretation. They use similar logic, time framing, and metric intent. ${evidenceNote}${metadataContextNote}`;
   }
 
   const sameEntitySpace = profileA.entityLabel === profileB.entityLabel;
@@ -392,14 +445,14 @@ function buildExplanation(
     : `The definitions do not even operate over the same entity space (${profileA.entityLabel} vs ${profileB.entityLabel})`;
 
   if (profileA.primaryDimension !== profileB.primaryDimension) {
-    return `${broadEntityText}, but they do not measure the same business concept. Query A measures ${profileA.primaryDimension === "engagement" ? "recent product engagement" : profileA.primaryDimension}, while Query B measures ${profileB.primaryDimension === "monetization" ? "monetized or paying activity" : profileB.primaryDimension}. They may look similar structurally, but they support different business decisions and should not be treated as interchangeable. ${evidenceNote}${missingMetadataNote}`;
+    return `${broadEntityText}, but they do not measure the same business concept. Query A measures ${profileA.primaryDimension === "engagement" ? "recent product engagement" : profileA.primaryDimension}, while Query B measures ${profileB.primaryDimension === "monetization" ? "monetized or paying activity" : profileB.primaryDimension}. They may look similar structurally, but they support different business decisions and should not be treated as interchangeable. ${evidenceNote}${metadataContextNote}`;
   }
 
   if (similarity < 45) {
-    return `${broadEntityText}, but the operational definition is materially different. Differences in activity basis, qualification rules, or time reference mean the metrics can diverge even if teams use similar names. ${evidenceNote}${missingMetadataNote}`;
+    return `${broadEntityText}, but the operational definition is materially different. Differences in activity basis, qualification rules, or time reference mean the metrics can diverge even if teams use similar names. ${evidenceNote}${metadataContextNote}`;
   }
 
-  return `${broadEntityText}, but there are still definition-level differences that should be documented before the metrics are compared in reporting. ${evidenceNote}${missingMetadataNote}`;
+  return `${broadEntityText}, but there are still definition-level differences that should be documented before the metrics are compared in reporting. ${evidenceNote}${metadataContextNote}`;
 }
 
 function buildRecommendation(
@@ -472,6 +525,8 @@ export function compareMetricDefinitions(
   const evidenceSources = deriveEvidenceSources(
     normalizedInputA,
     normalizedInputB,
+    profileA,
+    profileB,
     detectedDifferences,
   );
   const confidenceLevel = inferConfidenceLevel(evidenceSources, detectedDifferences);

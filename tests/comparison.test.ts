@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { compareMetricDefinitions } from "../src/analyzer/differenceEngine.js";
 import { fixtures } from "./fixtures.js";
 
@@ -66,5 +70,58 @@ test("metadata raises confidence when naming and context confirm divergence", ()
     result.detected_differences.some(
       (difference) => difference.category === "naming_alignment_mismatch",
     ),
+  );
+});
+
+test("partial metadata is called out accurately in the explanation", () => {
+  const result = compareMetricDefinitions(
+    fixtures.partialMetadata.inputA,
+    fixtures.partialMetadata.inputB,
+  );
+
+  assert.equal(result.confidence_level, "high");
+  assert.ok(result.evidence_sources.includes("metric_name"));
+  assert.ok(result.evidence_sources.includes("description"));
+  assert.match(result.explanation, /Partial metadata was available\./);
+  assert.match(result.explanation, /Available on only one side: team context, intended use\./);
+});
+
+test("cli reports friendly validation errors for malformed json metadata", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sdd-"));
+  const badAPath = join(dir, "bad-a.json");
+  const badBPath = join(dir, "bad-b.json");
+
+  writeFileSync(
+    badAPath,
+    JSON.stringify({ metric_name: 123, query: "SELECT COUNT(*) FROM users" }),
+    "utf8",
+  );
+  writeFileSync(
+    badBPath,
+    JSON.stringify({ query: "SELECT COUNT(*) FROM users" }),
+    "utf8",
+  );
+
+  assert.throws(
+    () =>
+      execFileSync(
+        "corepack",
+        [
+          "pnpm",
+          "compare",
+          "--json-a",
+          badAPath,
+          "--json-b",
+          badBPath,
+          "--format",
+          "json",
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      ),
+    /field "metric_name" must be a string if provided/,
   );
 });

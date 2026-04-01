@@ -110,6 +110,20 @@ function readMetricDefinitionFromJson(filePath: string): MetricDefinitionInput {
     throw new Error(`JSON input "${filePath}" must contain a string "query" field.`);
   }
 
+  const optionalFields: Array<keyof MetricDefinitionInput> = [
+    "metric_name",
+    "description",
+    "team_context",
+    "intended_use",
+  ];
+
+  for (const field of optionalFields) {
+    const value = parsed[field];
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`JSON input "${filePath}" field "${field}" must be a string if provided.`);
+    }
+  }
+
   return parsed;
 }
 

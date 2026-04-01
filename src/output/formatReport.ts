@@ -18,11 +18,24 @@ function getCategoryLabel(category: string): string {
   return categoryLabels[category] || category;
 }
 
+function sortFindingsByImportance(result: SemanticComparisonResult) {
+  const impactOrder = { high: 0, medium: 1, low: 2 };
+
+  return [...result.detected_differences].sort((left, right) => {
+    const impactDelta = impactOrder[left.impact] - impactOrder[right.impact];
+    if (impactDelta !== 0) {
+      return impactDelta;
+    }
+
+    return getCategoryLabel(left.category).localeCompare(getCategoryLabel(right.category));
+  });
+}
+
 export function formatReadableReport(result: SemanticComparisonResult): string {
   const differenceLines =
     result.detected_differences.length === 0
       ? ["- No meaningful semantic differences detected."]
-      : result.detected_differences.map(
+      : sortFindingsByImportance(result).map(
           (difference) =>
             `- [${difference.impact.toUpperCase()}] ${getCategoryLabel(difference.category)}: ${difference.description}`,
         );
@@ -108,7 +121,7 @@ function buildWhyItMatters(result: SemanticComparisonResult): string {
 }
 
 export function formatDemoReport(result: SemanticComparisonResult): string {
-  const topFindings = result.detected_differences.slice(0, 3);
+  const topFindings = sortFindingsByImportance(result).slice(0, 3);
   const findingLines =
     topFindings.length === 0
       ? ["- No major semantic conflict detected."]
