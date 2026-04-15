@@ -2,7 +2,9 @@
 
 > Detect when two metrics look similar — but mean different things.
 
----
+Detects that two metrics may look similar, but do not measure the same business concept.
+
+## ![Demo Output](docs/assets/demo-output.png)
 
 ### Example
 
