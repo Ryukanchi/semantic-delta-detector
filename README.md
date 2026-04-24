@@ -65,3 +65,7 @@ Use semantic-delta-detector directly in VS Code through an extension that calls 
 ## 📦 Status
 MVP with metadata-aware comparison (v2).
 Core comparison logic is structured and tested; SQL understanding is intentionally heuristic and still evolving.
+
+## 🔌 VS Code Extension
+Use the detector directly in your editor:
+https://github.com/Ryukanchi/semantic-delta-extension
