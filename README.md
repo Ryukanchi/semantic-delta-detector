@@ -1,83 +1,65 @@
-# Semantic Delta Detector
+# semantic-delta-detector
 
-> Detect when two metrics look similar — but mean different things.
+## 🚨 What this solves
+A dashboard can show “active users” in two places and hide two different definitions.
+One team may count product logins.
+Another may count paying users who were recently active.
 
-Detects that two metrics may look similar, but do not measure the same business concept.
+semantic-delta-detector catches that drift before teams compare incompatible KPIs, trust the wrong chart, or make decisions from the wrong number.
 
-## ![Demo Output](docs/assets/demo-output.png)
+## 🔍 Example (the hook)
+Two SQL queries can look similar, share a metric name, and still answer different business questions.
 
-### Example
+![Demo Output](docs/assets/demo-output.png)
 
-    Verdict: HIGH SEMANTIC CONFLICT
-    Confidence: high
-    Evidence: sql, metric_name, description, team_context
+Same metric name. Different business meaning. A dashboard mistake caught early.
 
-Same metric name. Different meaning. High confidence.
+## 💡 What it does
+- Detects semantic differences between SQL queries
+- Identifies mismatches in business meaning
+- Outputs similarity, risk, confidence, and explanation
+- Supports metadata-aware comparison (v2)
 
----
+## ⚠️ Why this matters
+- Misleading KPIs create false confidence
+- Inconsistent dashboards erode trust between teams
+- Similar metric names can hide different qualification rules
+- Bad definitions lead to bad product, finance, and growth decisions
 
-A CLI tool that detects **semantic differences between SQL queries** — before they break your metrics.
+## ⚙️ How it works (simple)
+- Reads two SQL-backed metric definitions
+- Extracts tables, filters, time windows, and aggregations
+- Infers the likely business meaning of each query
+- Compares whether the definitions are safe to treat as the same metric
+- Returns a compact risk report with explanation and recommendation
 
----
-
-## 🚀 Demo
-
-    corepack pnpm compare \
-      --json-a ./src/examples/product-active-users.json \
-      --json-b ./src/examples/finance-active-users.json \
-      --demo
-
-    Verdict: HIGH SEMANTIC CONFLICT
-    Interchangeability: Not safely interchangeable
-    Confidence: high
-    Evidence: sql, metric_name, description, team_context, intended_use
-
-👉 Same metric name. Different meaning. High confidence.
-
----
+## 🚀 Quick demo
+```bash
+npx semantic-delta-detector \
+  --json-a ./src/examples/product-active-users.json \
+  --json-b ./src/examples/finance-active-users.json \
+  --demo
+```
 
 ## 🧩 Features
-
 - SQL semantic comparison
-- Metadata-aware analysis (v2)
-- Confidence scoring
-- Evidence-based explanations
-- Demo mode
+- Metadata-aware comparison
+- Similarity and risk scoring
+- Confidence and evidence reporting
+- Human-readable and JSON output
+- Tested comparison cases for core behavior
 
----
+## 🛣️ Roadmap
+- VS Code extension integration
+- Improved SQL parsing
+- Richer semantic signals
 
-## 🛠 Usage
-
-### SQL mode
-
-    corepack pnpm compare --file-a a.sql --file-b b.sql
-
-### Metadata mode (v2)
-
-    corepack pnpm compare --json-a metricA.json --json-b metricB.json
-
----
-
-## 🧪 Example input
-
-    {
-      "metric_name": "active_users",
-      "team_context": "product",
-      "description": "Users who logged in during the last 30 days",
-      "intended_use": "product dashboard",
-      "query": "SELECT ..."
-    }
-
----
-
-## 🎯 Philosophy
-
-- Not a governance platform
+## 🧠 Philosophy
+- Not a SQL validator
 - Not a truth engine
-- Just a **small, sharp tool** that catches semantic conflicts early
-
----
+- Not a replacement for metric ownership
+- A semantic early warning system for metric drift
 
 ## 📦 Status
-
-MVP with metadata-aware comparison (v2)
+MVP with metadata-aware comparison (v2).
+Core comparison logic is structured and tested; SQL understanding is intentionally heuristic and still evolving.
