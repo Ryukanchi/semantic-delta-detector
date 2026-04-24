@@ -13,6 +13,7 @@ import {
   MetricDefinitionInput,
   ParsedSqlQuery,
   QuerySemanticProfile,
+  RiskLevel,
   SemanticComparisonResult,
 } from "../types.js";
 
@@ -72,7 +73,19 @@ function compareSourceDomain(
   profileB: QuerySemanticProfile,
 ): DetectedDifference | null {
   const sameTable = queryA.tables.some((table) => queryB.tables.includes(table));
-  if (sameTable || profileA.sourceDomain === profileB.sourceDomain) {
+  if (sameTable) {
+    return null;
+  }
+
+  if (isOrdersPaymentsSourceChange(queryA, queryB)) {
+    return {
+      category: "source_domain_mismatch",
+      description: `The queries use different commerce source tables: Query A reads from ${queryA.tables.join(", ")}, while Query B reads from ${queryB.tables.join(", ")}. Orders and payments may not be interchangeable: one order can have multiple payment attempts, payment records may include refunds, retries, failures, or provider-specific states, and order status and payment status may not represent the same business lifecycle.`,
+      impact: "high",
+    };
+  }
+
+  if (profileA.sourceDomain === profileB.sourceDomain) {
     return null;
   }
 
@@ -96,7 +109,33 @@ function compareAggregation(
 
   return {
     category: "aggregation_mismatch",
-    description: `The rollup logic differs: Query A uses ${queryA.aggregation || "no aggregation"} over ${queryA.aggregationDistinctTarget || "*"}, while Query B uses ${queryB.aggregation || "no aggregation"} over ${queryB.aggregationDistinctTarget || "*"}.`,
+    description: buildAggregationDifferenceDescription(queryA, queryB),
+    impact: "high",
+  };
+}
+
+function compareJoinPopulation(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference | null {
+  const sharedTables = queryA.tables.filter((table) => queryB.tables.includes(table));
+  if (sharedTables.length === 0 || queryA.tables.length === queryB.tables.length) {
+    return null;
+  }
+
+  const joinedQueryLabel = queryA.tables.length > queryB.tables.length ? "Query A" : "Query B";
+  const simpleQueryLabel = joinedQueryLabel === "Query A" ? "Query B" : "Query A";
+  const joinedQuery = joinedQueryLabel === "Query A" ? queryA : queryB;
+  const simpleQuery = joinedQueryLabel === "Query A" ? queryB : queryA;
+  const extraTables = joinedQuery.tables.filter((table) => !simpleQuery.tables.includes(table));
+
+  if (extraTables.length === 0) {
+    return null;
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `${joinedQueryLabel} joins ${sharedTables.join(", ")} to ${extraTables.join(", ")}, while ${simpleQueryLabel} reads only ${simpleQuery.tables.join(", ")}. The JOIN can restrict the population to records with matching rows from ${extraTables.join(", ")} and may multiply rows when the relationship is one-to-many.`,
     impact: "high",
   };
 }
@@ -188,14 +227,370 @@ function compareMonetization(
     return null;
   }
 
-  const aSignal = queryA.filters.find((filter) => /paid|subscription|plan|mrr|arr/i.test(filter));
-  const bSignal = queryB.filters.find((filter) => /paid|subscription|plan|mrr|arr/i.test(filter));
+  const aSignal = queryA.filters.find(isMonetizationFilter);
+  const bSignal = queryB.filters.find(isMonetizationFilter);
+
+  if (aSignal && !bSignal) {
+    return {
+      category: "monetization_mismatch",
+      description: `Query B removes the monetization gate from Query A (${formatFilterList([aSignal])}). The measured population becomes broader: Query A measures monetized ${profileA.entityLabel}, while Query B measures all ${profileB.entityLabel}.`,
+      impact: "high",
+    };
+  }
+
+  if (bSignal && !aSignal) {
+    return {
+      category: "monetization_mismatch",
+      description: `Query B adds a monetization gate that Query A does not have (${formatFilterList([bSignal])}). The measured population becomes narrower: Query A measures all ${profileA.entityLabel}, while Query B measures monetized ${profileB.entityLabel}.`,
+      impact: "high",
+    };
+  }
 
   return {
     category: "monetization_mismatch",
     description: `Only one query includes a monetization gate. Query A: ${aSignal || "no monetization condition detected"}. Query B: ${bSignal || "no monetization condition detected"}.`,
     impact: "high",
   };
+}
+
+function isMonetizationFilter(filter: string): boolean {
+  return /paid|subscription|mrr|arr|is_paid|revenue\s*>\s*0/i.test(filter);
+}
+
+function isRevenueField(field: string | null): boolean {
+  return Boolean(field && /^(amount|total|revenue|price)$/i.test(field));
+}
+
+function hasTableMatching(query: ParsedSqlQuery, pattern: RegExp): boolean {
+  return query.tables.some((table) => pattern.test(table));
+}
+
+function isOrdersPaymentsSourceChange(queryA: ParsedSqlQuery, queryB: ParsedSqlQuery): boolean {
+  const aUsesOrders = hasTableMatching(queryA, /\borders?\b/i);
+  const bUsesOrders = hasTableMatching(queryB, /\borders?\b/i);
+  const aUsesPayments = hasTableMatching(queryA, /\bpayments?\b/i);
+  const bUsesPayments = hasTableMatching(queryB, /\bpayments?\b/i);
+
+  return (aUsesOrders && bUsesPayments) || (aUsesPayments && bUsesOrders);
+}
+
+function formatFilterList(filters: string[]): string {
+  return filters.map((filter) => `"${filter}"`).join("; ");
+}
+
+function describeRemovedExclusion(filter: string): string | null {
+  if (/status\s*!=\s*'deleted'/i.test(filter)) {
+    return "deleted users";
+  }
+
+  if (/deleted_at\s+is\s+null/i.test(filter)) {
+    return "users with deleted_at set";
+  }
+
+  if (/is_deleted\s*=\s*false/i.test(filter)) {
+    return "deleted users";
+  }
+
+  if (/is_test\s*=\s*false/i.test(filter)) {
+    return "test users";
+  }
+
+  if (/email\s+not\s+like\s+'%@company\.com'/i.test(filter)) {
+    return "internal/company accounts";
+  }
+
+  return null;
+}
+
+function formatPotentiallyIncludedPopulation(excludedPopulation: string): string {
+  if (excludedPopulation === "internal/company accounts") {
+    return "employee/internal/test accounts";
+  }
+
+  return excludedPopulation;
+}
+
+function findRemovedExclusion(filters: string[]): {
+  filter: string;
+  excludedPopulation: string;
+} | null {
+  for (const filter of filters) {
+    const excludedPopulation = describeRemovedExclusion(filter);
+    if (excludedPopulation) {
+      return { filter, excludedPopulation };
+    }
+  }
+
+  return null;
+}
+
+interface SegmentFilter {
+  field: string;
+  value: string;
+}
+
+function parseSegmentFilter(filter: string): SegmentFilter | null {
+  const match = filter.match(
+    /^(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?(country|region|market|locale|plan|tier|device|platform)\s*=\s*(?:'([^']+)'|"([^"]+)"|([a-zA-Z0-9_-]+))$/i,
+  );
+  if (!match || isMonetizationFilter(filter)) {
+    return null;
+  }
+
+  return {
+    field: match[1].toLowerCase(),
+    value: match[2] || match[3] || match[4],
+  };
+}
+
+function findSegmentChange(filtersA: string[], filtersB: string[]): {
+  a: SegmentFilter;
+  b: SegmentFilter;
+} | null {
+  for (const filterA of filtersA) {
+    const segmentA = parseSegmentFilter(filterA);
+    if (!segmentA) {
+      continue;
+    }
+
+    const matchingSegmentB = filtersB
+      .map((filterB) => parseSegmentFilter(filterB))
+      .find((segmentB): segmentB is SegmentFilter =>
+        Boolean(segmentB && segmentB.field === segmentA.field && segmentB.value !== segmentA.value),
+      );
+
+    if (matchingSegmentB) {
+      return { a: segmentA, b: matchingSegmentB };
+    }
+  }
+
+  return null;
+}
+
+function formatSegmentValue(segment: SegmentFilter): string {
+  return segment.value.toUpperCase();
+}
+
+function describeSegmentPopulation(query: ParsedSqlQuery): string | null {
+  const segment = query.filters.map((filter) => parseSegmentFilter(filter)).find(Boolean);
+  if (!segment) {
+    return null;
+  }
+
+  if (segment.field === "country") {
+    return `${formatSegmentValue(segment)} users`;
+  }
+
+  return `${formatSegmentValue(segment)} ${segment.field} users`;
+}
+
+function describeExclusionPopulation(query: ParsedSqlQuery): string | null {
+  const removedExclusion = findRemovedExclusion(query.filters);
+  if (!removedExclusion) {
+    return null;
+  }
+
+  if (removedExclusion.excludedPopulation === "deleted users") {
+    return "users excluding deleted users";
+  }
+
+  return `users excluding ${removedExclusion.excludedPopulation}`;
+}
+
+function formatAggregation(query: ParsedSqlQuery): string {
+  if (!query.aggregation) {
+    return "no aggregation";
+  }
+
+  if (query.aggregation === "count" && getDistinctCountTarget(query)) {
+    return `COUNT(DISTINCT ${query.aggregationDistinctTarget || "*"})`;
+  }
+
+  return `${query.aggregation.toUpperCase()}(${query.aggregationDistinctTarget || "*"})`;
+}
+
+function getDistinctCountTarget(query: ParsedSqlQuery): string | null {
+  const distinctCountExpression = query.selectedExpressions.find((expression) =>
+    /\bcount\s*\(\s*distinct\s+/i.test(expression),
+  );
+
+  return distinctCountExpression ? query.aggregationDistinctTarget : null;
+}
+
+function isDistinctUserVsRowCountChange(queryA: ParsedSqlQuery, queryB: ParsedSqlQuery): boolean {
+  const aCountsUsers = queryA.aggregation === "count" && getDistinctCountTarget(queryA) === "user_id";
+  const bCountsUsers = queryB.aggregation === "count" && getDistinctCountTarget(queryB) === "user_id";
+  const aCountsRows = queryA.aggregation === "count" && queryA.aggregationDistinctTarget === "*";
+  const bCountsRows = queryB.aggregation === "count" && queryB.aggregationDistinctTarget === "*";
+
+  return (aCountsUsers && bCountsRows) || (aCountsRows && bCountsUsers);
+}
+
+function describeDistinctUserRowCountChange(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): string {
+  const aDistinctTarget = getDistinctCountTarget(queryA);
+  const bDistinctTarget = getDistinctCountTarget(queryB);
+
+  if (aDistinctTarget && queryB.aggregationDistinctTarget === "*") {
+    return `Query A counts distinct ${aDistinctTarget} values, while Query B counts event rows.`;
+  }
+
+  if (bDistinctTarget && queryA.aggregationDistinctTarget === "*") {
+    return `Query A counts event rows, while Query B counts distinct ${bDistinctTarget} values.`;
+  }
+
+  return "One query counts distinct values, while the other counts event rows.";
+}
+
+function buildAggregationDifferenceDescription(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): string {
+  const baseDescription = `Aggregation changed from ${formatAggregation(queryA)} to ${formatAggregation(queryB)}. Query A uses ${queryA.aggregation || "no aggregation"} over ${queryA.aggregationDistinctTarget || "*"}, while Query B uses ${queryB.aggregation || "no aggregation"} over ${queryB.aggregationDistinctTarget || "*"}.`;
+
+  if (isDistinctUserVsRowCountChange(queryA, queryB)) {
+    return `${baseDescription} ${describeDistinctUserRowCountChange(queryA, queryB)} This changes the metric from unique users to event rows; repeated events by the same user can make COUNT(*) larger than COUNT(DISTINCT user_id).`;
+  }
+
+  return baseDescription;
+}
+
+function getTableLabel(query: ParsedSqlQuery): string {
+  if (query.tables.some((table) => /\bevents?\b/i.test(table))) {
+    return "events";
+  }
+
+  if (query.tables.some((table) => /\busers?\b/i.test(table))) {
+    return "users";
+  }
+
+  if (query.tables.length > 0) {
+    return query.tables.join(", ");
+  }
+
+  return "records";
+}
+
+function describeFilterScope(query: ParsedSqlQuery): string {
+  const eventFilter = query.filters.find((filter) => /\bevent\s*=\s*'[^']+'/i.test(filter));
+  const eventName = eventFilter?.match(/'([^']+)'/)?.[1];
+  if (eventName) {
+    return `${eventName} events`;
+  }
+
+  if (query.filters.length > 0) {
+    return `${getTableLabel(query)} matching ${formatFilterList(query.filters)}`;
+  }
+
+  return `all ${getTableLabel(query)}`;
+}
+
+function describeDistinctUserOrRowCount(
+  query: ParsedSqlQuery,
+  timeWindowLabel: string | null,
+): string | null {
+  const eventFilter = query.filters.find((filter) => /\bevent\s*=\s*'[^']+'/i.test(filter));
+  const eventName = eventFilter?.match(/'([^']+)'/)?.[1];
+  if (!eventName || query.aggregation !== "count") {
+    return null;
+  }
+
+  if (query.aggregationDistinctTarget === "user_id") {
+    return `Measures unique users with ${eventName} events.`;
+  }
+
+  if (query.aggregationDistinctTarget === "*") {
+    const timePrefix = timeWindowLabel ? `${timeWindowLabel} ` : "";
+    return `Measures ${timePrefix}${eventName} events / ${eventName} event rows.`;
+  }
+
+  return null;
+}
+
+function describeJoinPopulation(query: ParsedSqlQuery): string | null {
+  if (query.tables.length < 2) {
+    return null;
+  }
+
+  const baseTable = query.tables[0];
+  const joinedTables = query.tables.slice(1);
+
+  if (hasTableMatching(query, /\busers?\b/i) && hasTableMatching(query, /\borders?\b/i)) {
+    return "Measures users joined with orders / users with matching order records.";
+  }
+
+  return `Measures ${baseTable} joined with ${joinedTables.join(", ")}.`;
+}
+
+function getSingularEntityLabel(query: ParsedSqlQuery): string {
+  const label = getTableLabel(query);
+  if (label === "orders/transactions" || /^orders?\b/i.test(label)) {
+    return "order";
+  }
+
+  if (/^payments?\b/i.test(label)) {
+    return "payment";
+  }
+
+  if (/^users?\b/i.test(label)) {
+    return "user";
+  }
+
+  if (/^events?\b/i.test(label)) {
+    return "event";
+  }
+
+  return "record";
+}
+
+function describeQualifiedEntity(query: ParsedSqlQuery): string {
+  const entity = getSingularEntityLabel(query);
+  const eventFilter = query.filters.find((filter) => /\bevent\s*=\s*'[^']+'/i.test(filter));
+  const eventName = eventFilter?.match(/'([^']+)'/)?.[1];
+  if (eventName) {
+    return `${eventName} ${entity}s`;
+  }
+
+  const monetizationFilter = query.filters.find(isMonetizationFilter);
+  if (monetizationFilter) {
+    return `paid ${entity}s`;
+  }
+
+  if (query.filters.length > 0) {
+    return `${entity}s matching ${formatFilterList(query.filters)}`;
+  }
+
+  return `all ${entity}s`;
+}
+
+function formatTimeWindowLabel(timeHorizon: string | null): string | null {
+  if (!timeHorizon) {
+    return null;
+  }
+
+  const match = timeHorizon.match(/^(\d+)\s+([a-z]+)s?$/i);
+  if (!match) {
+    return timeHorizon;
+  }
+
+  return `${match[1]}-${match[2].toLowerCase().replace(/s$/, "")}`;
+}
+
+function describeAggregationMeasure(query: ParsedSqlQuery): string | null {
+  const qualifiedEntity = describeQualifiedEntity(query);
+
+  const isCommercialEntity = query.tables.some((table) => /orders?|payments?|transactions?/i.test(table));
+  if (query.aggregation === "count" && isCommercialEntity) {
+    return `Measures the count of ${qualifiedEntity}.`;
+  }
+
+  if (query.aggregation === "sum" && isRevenueField(query.aggregationDistinctTarget)) {
+    return `Measures the total amount/revenue from ${qualifiedEntity}.`;
+  }
+
+  return null;
 }
 
 function compareBusinessLogic(
@@ -206,7 +601,7 @@ function compareBusinessLogic(
 ): DetectedDifference | null {
   const ignorePatterns = [
     /paid|subscription|plan|mrr|arr/i,
-    /event\s*=|last_active|event_date|created_at|current_date|current_timestamp|interval/i,
+    /last_active|event_date|created_at|current_date|current_timestamp|interval/i,
   ];
   const onlyInA = queryA.filters.filter(
     (value) => !queryB.filters.includes(value) && !ignorePatterns.some((pattern) => pattern.test(value)),
@@ -221,10 +616,46 @@ function compareBusinessLogic(
 
   const sameEntitySpace = profileA.entityLabel === profileB.entityLabel;
   const impact = sameEntitySpace ? "medium" : "high";
+  const scopeA = describeFilterScope(queryA);
+  const scopeB = describeFilterScope(queryB);
+  const removedExclusion = findRemovedExclusion(onlyInA);
+  const segmentChange = findSegmentChange(onlyInA, onlyInB);
+
+  if (removedExclusion && onlyInB.length === 0) {
+    return {
+      category: "business_logic_mismatch",
+      description: `Query B removes the exclusion filter from Query A (${formatFilterList([removedExclusion.filter])}). The measured population becomes broader and may now include ${formatPotentiallyIncludedPopulation(removedExclusion.excludedPopulation)}. Query A measures ${describeExclusionPopulation(queryA) || scopeA}, while Query B measures ${scopeB}.`,
+      impact,
+    };
+  }
+
+  if (segmentChange) {
+    return {
+      category: "business_logic_mismatch",
+      description: `The segment filter changes on ${segmentChange.a.field}: Query A measures ${formatSegmentValue(segmentChange.a)}, while Query B measures ${formatSegmentValue(segmentChange.b)}. The metric shape is the same, but the queries compare different user cohorts/segments.`,
+      impact: "medium",
+    };
+  }
+
+  if (onlyInA.length > 0 && onlyInB.length === 0) {
+    return {
+      category: "business_logic_mismatch",
+      description: `Query B removes filter logic from Query A (${formatFilterList(onlyInA)}). The measured population becomes broader: Query A measures ${scopeA}, while Query B measures ${scopeB}. This changes the business meaning of the metric, not just the SQL shape.`,
+      impact,
+    };
+  }
+
+  if (onlyInB.length > 0 && onlyInA.length === 0) {
+    return {
+      category: "business_logic_mismatch",
+      description: `Query B adds filter logic that Query A does not have (${formatFilterList(onlyInB)}). The measured population becomes narrower: Query A measures ${scopeA}, while Query B measures ${scopeB}. This changes the business meaning of the metric, not just the SQL shape.`,
+      impact,
+    };
+  }
 
   return {
     category: "business_logic_mismatch",
-    description: `The inclusion logic is different. Query A keeps ${onlyInA.join("; ") || "no unique filters"}, while Query B keeps ${onlyInB.join("; ") || "no unique filters"}. This changes who qualifies for the metric.`,
+    description: `The inclusion logic is different. Query A keeps ${formatFilterList(onlyInA) || "no unique filters"}, while Query B keeps ${formatFilterList(onlyInB) || "no unique filters"}. This changes who qualifies for the metric.`,
     impact,
   };
 }
@@ -290,8 +721,46 @@ function compareIntendedUse(
 function compareMetricIntent(
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
+  differences: DetectedDifference[],
 ): DetectedDifference | null {
   if (profileA.businessMeaning === profileB.businessMeaning) {
+    return null;
+  }
+
+  const hasMonetizationMismatch = differences.some(
+    (difference) => difference.category === "monetization_mismatch",
+  );
+  const monetizationVsPopulation =
+    [profileA.primaryDimension, profileB.primaryDimension].includes("monetization") &&
+    [profileA.primaryDimension, profileB.primaryDimension].includes("population");
+  if (hasMonetizationMismatch && monetizationVsPopulation) {
+    return null;
+  }
+
+  if (
+    profileA.primaryDimension === profileB.primaryDimension &&
+    differences.some((difference) => difference.category === "source_domain_mismatch")
+  ) {
+    return null;
+  }
+
+  if (
+    differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        /The JOIN can restrict the population/i.test(difference.description),
+    )
+  ) {
+    return null;
+  }
+
+  if (
+    differences.some(
+      (difference) =>
+        difference.category === "aggregation_mismatch" &&
+        /unique users to event rows/i.test(difference.description),
+    )
+  ) {
     return null;
   }
 
@@ -386,6 +855,21 @@ function inferConfidenceLevel(
   return "medium";
 }
 
+function ensureRiskCoversDetectedDifferences(
+  riskLevel: RiskLevel,
+  differences: DetectedDifference[],
+): RiskLevel {
+  if (differences.some((difference) => difference.impact === "high")) {
+    return "high";
+  }
+
+  if (riskLevel === "low" && differences.some((difference) => difference.impact === "medium")) {
+    return "medium";
+  }
+
+  return riskLevel;
+}
+
 function buildMetadataContextNote(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
@@ -417,6 +901,47 @@ function buildMetadataContextNote(
   return " Full metadata context was available for both inputs.";
 }
 
+function buildBusinessMeaningSummary(query: ParsedSqlQuery, profile: QuerySemanticProfile): string {
+  const eventFilter = query.filters.find((filter) => /\bevent\s*=\s*'[^']+'/i.test(filter));
+  const eventName = eventFilter?.match(/'([^']+)'/)?.[1];
+  const timeWindowLabel = formatTimeWindowLabel(profile.timeHorizon);
+  const distinctUserOrRowCount = describeDistinctUserOrRowCount(query, timeWindowLabel);
+  if (distinctUserOrRowCount) {
+    return distinctUserOrRowCount;
+  }
+
+  if (eventName) {
+    const timePrefix = timeWindowLabel ? `${timeWindowLabel} ` : "";
+    return `Measures ${timePrefix}${eventName} events from ${query.tables.join(", ") || "the source dataset"}.`;
+  }
+
+  const joinPopulation = describeJoinPopulation(query);
+  if (joinPopulation) {
+    return joinPopulation;
+  }
+
+  if (!query.whereClause) {
+    return `Measures ${describeFilterScope(query)} without a WHERE filter.`;
+  }
+
+  const aggregationMeasure = describeAggregationMeasure(query);
+  if (aggregationMeasure) {
+    return aggregationMeasure;
+  }
+
+  const segmentPopulation = describeSegmentPopulation(query);
+  if (segmentPopulation) {
+    return `Measures ${segmentPopulation}.`;
+  }
+
+  const exclusionPopulation = describeExclusionPopulation(query);
+  if (exclusionPopulation) {
+    return `Measures ${exclusionPopulation}.`;
+  }
+
+  return profile.businessMeaning;
+}
+
 function buildExplanation(
   similarity: number,
   inputA: MetricDefinitionInput,
@@ -443,6 +968,89 @@ function buildExplanation(
   const broadEntityText = sameEntitySpace
     ? `Both definitions operate in the same broad entity space (${profileA.entityLabel})`
     : `The definitions do not even operate over the same entity space (${profileA.entityLabel} vs ${profileB.entityLabel})`;
+  const filterScopeDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /measured population becomes (?:broader|narrower)/i.test(difference.description),
+  );
+  const removedExclusionDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /removes the exclusion filter/i.test(difference.description),
+  );
+  const joinPopulationDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /The JOIN can restrict the population/i.test(difference.description),
+  );
+  const segmentDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /different user cohorts\/segments/i.test(difference.description),
+  );
+  const commerceSourceDifference = differences.find(
+    (difference) =>
+      difference.category === "source_domain_mismatch" &&
+      /Orders and payments may not be interchangeable/i.test(difference.description),
+  );
+  const monetizationScopeDifference = differences.find(
+    (difference) =>
+      difference.category === "monetization_mismatch" &&
+      /measured population becomes (?:broader|narrower)/i.test(difference.description),
+  );
+  const countRevenueAggregationDifference = differences.find(
+    (difference) =>
+      difference.category === "aggregation_mismatch" &&
+      /COUNT\([^)]*\).*SUM\((?:amount|total|revenue|price)\)|SUM\((?:amount|total|revenue|price)\).*COUNT\([^)]*\)/i.test(
+        difference.description,
+      ),
+  );
+  const distinctUserRowCountDifference = differences.find(
+    (difference) =>
+      difference.category === "aggregation_mismatch" &&
+      /unique users to event rows/i.test(difference.description),
+  );
+  const timeWindowDifference = differences.find(
+    (difference) =>
+      difference.category === "time_reference_mismatch" &&
+      /different recency windows/i.test(difference.description),
+  );
+
+  if (removedExclusionDifference) {
+    return `${broadEntityText}, but removing the exclusion filter broadens the population. ${removedExclusionDifference.description} ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (filterScopeDifference) {
+    return `${broadEntityText}, but the filter scope changes the measured population. ${filterScopeDifference.description} ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (joinPopulationDifference) {
+    return `${broadEntityText}, but the JOIN changes the measured population. ${joinPopulationDifference.description} This means the metric may count joined rows or users with matching joined records rather than all base-table users. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (segmentDifference) {
+    return `${broadEntityText}, but the segment filter changes the measured cohort. ${segmentDifference.description} This can make the counts diverge even though the table, aggregation, and filter field are aligned. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (commerceSourceDifference) {
+    return `${broadEntityText}, and the filter logic is similar, but the source of truth changes. ${commerceSourceDifference.description} ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (monetizationScopeDifference) {
+    return `${broadEntityText}, but the monetization gate changes the measured population. ${monetizationScopeDifference.description} ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (countRevenueAggregationDifference) {
+    return `${broadEntityText}, and the filters match, but the metric measure changes. ${countRevenueAggregationDifference.description} This is not just a qualification-rule difference: it changes the metric from order volume/count to monetary value/revenue. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (distinctUserRowCountDifference) {
+    return `${broadEntityText}, and the event filter matches, but the counted unit changes. ${distinctUserRowCountDifference.description} This means one query measures unique users while the other measures event-row volume. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (timeWindowDifference) {
+    return `${broadEntityText}, and the event concept is aligned, but the reporting window differs. ${timeWindowDifference.description} This changes which period the metric represents even though the underlying activity is the same. ${evidenceNote}${metadataContextNote}`;
+  }
 
   if (profileA.primaryDimension !== profileB.primaryDimension) {
     return `${broadEntityText}, but they do not measure the same business concept. Query A measures ${profileA.primaryDimension === "engagement" ? "recent product engagement" : profileA.primaryDimension}, while Query B measures ${profileB.primaryDimension === "monetization" ? "monetized or paying activity" : profileB.primaryDimension}. They may look similar structurally, but they support different business decisions and should not be treated as interchangeable. ${evidenceNote}${metadataContextNote}`;
@@ -455,6 +1063,14 @@ function buildExplanation(
   return `${broadEntityText}, but there are still definition-level differences that should be documented before the metrics are compared in reporting. ${evidenceNote}${metadataContextNote}`;
 }
 
+function buildTimeWindowRecommendation(difference: DetectedDifference): string {
+  const match = difference.description.match(/recency windows:\s+(.+?)\s+in Query A vs\s+(.+?)\s+in Query B/i);
+  const queryAWindow = formatTimeWindowLabel(match?.[1] || null) || "the Query A";
+  const queryBWindow = formatTimeWindowLabel(match?.[2] || null) || "the Query B";
+
+  return `Confirm whether the time-window change is intentional. Do not compare ${queryAWindow} and ${queryBWindow} counts in the same KPI trendline without renaming or documenting the metric.`;
+}
+
 function buildRecommendation(
   similarity: number,
   profileA: QuerySemanticProfile,
@@ -462,6 +1078,95 @@ function buildRecommendation(
   differences: DetectedDifference[],
 ): string {
   const categories = new Set(differences.map((difference) => difference.category));
+  const removedFilterDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /Query B removes filter logic from Query A/i.test(difference.description),
+  );
+
+  const removedExclusionDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /removes the exclusion filter/i.test(difference.description),
+  );
+
+  if (removedExclusionDifference) {
+    if (/internal\/company accounts|employee\/internal\/test accounts|test users/i.test(removedExclusionDifference.description)) {
+      return "Confirm whether including internal/test accounts is intentional. Do not compare external-user counts with all-user counts without documenting the population definition.";
+    }
+
+    return "Confirm whether including deleted users is intentional. Do not compare active/non-deleted user counts with all-user counts without documenting the population definition.";
+  }
+
+  if (removedFilterDifference) {
+    return "Confirm whether removing the filter is intentional. Downstream dashboards expecting the narrower filtered activity may now include the broader population.";
+  }
+
+  const joinPopulationDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /The JOIN can restrict the population/i.test(difference.description),
+  );
+
+  if (joinPopulationDifference) {
+    return "Confirm whether the JOIN is intentional. Do not compare joined user-order counts with all-user counts without documenting whether the metric counts users, orders, or joined rows.";
+  }
+
+  const segmentDifference = differences.find(
+    (difference) =>
+      difference.category === "business_logic_mismatch" &&
+      /different user cohorts\/segments/i.test(difference.description),
+  );
+
+  if (segmentDifference) {
+    const match = segmentDifference.description.match(/Query A measures ([^,]+), while Query B measures ([^.]+)\./i);
+    const segmentA = match?.[1] || "one segment";
+    const segmentB = match?.[2] || "another segment";
+
+    return `Confirm whether the segment change is intentional. Do not compare ${segmentA}-user and ${segmentB}-user counts as the same KPI without labeling or documenting the segment.`;
+  }
+
+  const removedMonetizationGate = differences.find(
+    (difference) =>
+      difference.category === "monetization_mismatch" &&
+      /Query B removes the monetization gate from Query A/i.test(difference.description),
+  );
+
+  if (removedMonetizationGate) {
+    return "Confirm whether this is an intentional metric-definition change. Do not compare paid-user counts with all-user counts in the same KPI trendline without renaming or documenting the metric.";
+  }
+
+  const commerceSourceDifference = differences.find(
+    (difference) =>
+      difference.category === "source_domain_mismatch" &&
+      /Orders and payments may not be interchangeable/i.test(difference.description),
+  );
+
+  if (commerceSourceDifference) {
+    return "Confirm which source of truth is intended. Do not compare order-based and payment-based counts as the same KPI without documenting the metric contract.";
+  }
+
+  const countRevenueAggregationDifference = differences.find(
+    (difference) =>
+      difference.category === "aggregation_mismatch" &&
+      /COUNT\([^)]*\).*SUM\((?:amount|total|revenue|price)\)|SUM\((?:amount|total|revenue|price)\).*COUNT\([^)]*\)/i.test(
+        difference.description,
+      ),
+  );
+
+  if (countRevenueAggregationDifference) {
+    return "Do not compare paid order count and paid order revenue as the same KPI. Rename or document these as separate metrics before using them in dashboards or trendlines.";
+  }
+
+  const distinctUserRowCountDifference = differences.find(
+    (difference) =>
+      difference.category === "aggregation_mismatch" &&
+      /unique users to event rows/i.test(difference.description),
+  );
+
+  if (distinctUserRowCountDifference) {
+    return "Do not compare unique-user login counts with login event-row counts as the same KPI. Confirm whether the metric is intended to count users or events.";
+  }
 
   if (
     categories.has("monetization_mismatch") &&
@@ -470,6 +1175,16 @@ function buildRecommendation(
       categories.has("team_context_mismatch"))
   ) {
     return "Use separate metric names for engagement and monetized activity. Do not compare these results in the same KPI trendline without an explicit metric contract, and clarify whether the audience is product, finance, or executive reporting.";
+  }
+
+  const timeWindowDifference = differences.find(
+    (difference) =>
+      difference.category === "time_reference_mismatch" &&
+      /different recency windows/i.test(difference.description),
+  );
+
+  if (timeWindowDifference) {
+    return buildTimeWindowRecommendation(timeWindowDifference);
   }
 
   if (categories.has("time_reference_mismatch")) {
@@ -501,8 +1216,8 @@ export function compareMetricDefinitions(
   const parsedB = tokenizeSql(normalizedInputB.query);
   const profileA = buildSemanticProfile(parsedA);
   const profileB = buildSemanticProfile(parsedB);
-  const likelyBusinessMeaningA = profileA.businessMeaning;
-  const likelyBusinessMeaningB = profileB.businessMeaning;
+  const likelyBusinessMeaningA = buildBusinessMeaningSummary(parsedA, profileA);
+  const likelyBusinessMeaningB = buildBusinessMeaningSummary(parsedB, profileB);
 
   const detectedDifferences: DetectedDifference[] = [];
   pushDifference(
@@ -511,6 +1226,7 @@ export function compareMetricDefinitions(
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
+  pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
   pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
@@ -518,10 +1234,13 @@ export function compareMetricDefinitions(
   pushDifference(detectedDifferences, compareDescriptions(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareTeamContext(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareIntendedUse(normalizedInputA, normalizedInputB));
-  pushDifference(detectedDifferences, compareMetricIntent(profileA, profileB));
+  pushDifference(detectedDifferences, compareMetricIntent(profileA, profileB, detectedDifferences));
 
   const semanticSimilarityScore = estimateBaseSimilarity(parsedA, parsedB);
-  const riskLevel = inferRiskLevel(semanticSimilarityScore);
+  const riskLevel = ensureRiskCoversDetectedDifferences(
+    inferRiskLevel(semanticSimilarityScore),
+    detectedDifferences,
+  );
   const evidenceSources = deriveEvidenceSources(
     normalizedInputA,
     normalizedInputB,

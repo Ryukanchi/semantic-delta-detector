@@ -34,18 +34,21 @@ function inferDimensionFromText(text: string): BusinessDimension {
   if (
     containsAny(joined, [
       "subscription_status = 'paid'",
+      "subscription_status = 'active'",
       "subscription",
       "plan =",
       "paid",
+      "is_paid",
       "mrr",
       "arr",
-    ])
+    ]) ||
+    containsPattern(joined, /\brevenue\s*>\s*0\b/)
   ) {
     return "monetization";
   }
 
   if (
-    containsAny(joined, ["event = 'login'", "event =", "last_active", "session", "usage"]) ||
+    containsAny(joined, ["events", "event = 'login'", "event =", "last_active", "session", "usage"]) ||
     containsPattern(joined, /\bactive\b/)
   ) {
     return "engagement";
@@ -61,6 +64,10 @@ function inferDimensionFromText(text: string): BusinessDimension {
 
   if (containsAny(joined, ["order", "revenue", "amount", "gmv", "sales"])) {
     return "revenue";
+  }
+
+  if (containsAny(joined, ["users", "profiles", "accounts"])) {
+    return "population";
   }
 
   return "unknown";
@@ -79,14 +86,15 @@ function detectSecondaryDimensions(
 
   if (
     primaryDimension !== "monetization" &&
-    containsAny(joined, ["subscription", "paid", "plan =", "mrr", "arr"])
+    (containsAny(joined, ["subscription", "paid", "is_paid", "plan =", "mrr", "arr"]) ||
+      containsPattern(joined, /\brevenue\s*>\s*0\b/))
   ) {
     dimensions.push("monetization");
   }
 
   if (
     primaryDimension !== "engagement" &&
-    (containsAny(joined, ["event =", "last_active", "session", "usage"]) ||
+    (containsAny(joined, ["events", "event =", "last_active", "session", "usage"]) ||
       containsPattern(joined, /\bactive\b/))
   ) {
     dimensions.push("engagement");
@@ -113,7 +121,7 @@ function detectEntityLabel(query: ParsedSqlQuery): string {
     return "users";
   }
 
-  if (containsAny(joined, ["order", "transaction"])) {
+  if (containsAny(joined, ["order", "payment", "transaction"])) {
     return "orders/transactions";
   }
 
@@ -202,6 +210,10 @@ function buildBusinessMeaning(profile: Omit<QuerySemanticProfile, "businessMeani
 
   if (profile.primaryDimension === "acquisition") {
     return `Measures newly created ${profile.entityLabel} entering the product or funnel.`;
+  }
+
+  if (profile.primaryDimension === "population") {
+    return `Measures the overall ${profile.entityLabel} population.`;
   }
 
   if (profile.primaryDimension === "eligibility") {

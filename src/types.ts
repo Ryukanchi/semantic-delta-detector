@@ -24,6 +24,7 @@ export type BusinessDimension =
   | "monetization"
   | "eligibility"
   | "acquisition"
+  | "population"
   | "revenue"
   | "unknown";
 
