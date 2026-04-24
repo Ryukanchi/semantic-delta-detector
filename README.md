@@ -18,7 +18,7 @@ Same metric name. Different business meaning. A dashboard mistake caught early.
 - Detects semantic differences between SQL queries
 - Identifies mismatches in business meaning
 - Outputs similarity, risk, confidence, and explanation
-- Supports metadata-aware comparison (v2)
+- Can use optional metric metadata when provided
 
 ## ⚠️ Why this matters
 - Misleading KPIs create false confidence
@@ -33,6 +33,22 @@ Same metric name. Different business meaning. A dashboard mistake caught early.
 - Compares whether the definitions are safe to treat as the same metric
 - Returns a compact risk report with explanation and recommendation
 
+## Semantic Risk Examples
+Same-looking SQL changes can mean different KPIs. These examples show the kinds of semantic drift the detector is designed to flag.
+
+| Scenario | Query A meaning | Query B meaning | Risk | Why it matters |
+| --- | --- | --- | --- | --- |
+| Login events -> all events | Login events | All events | Medium | Removing `event = 'login'` broadens the metric from one activity to every event row. |
+| Paid users -> all users | Monetized users | All users | High | Removing a paid/subscription gate changes the population behind the KPI. |
+| 7-day logins -> 30-day logins | 7-day login events | 30-day login events | Medium | Same event concept, different reporting window. |
+| Paid order count -> paid order revenue | Count of paid orders | Revenue from paid orders | High | Count and monetary value should not be treated as the same metric. |
+| Paid orders -> paid payments | Paid order records | Paid payment records | High | Orders and payments can represent different source-of-truth lifecycles. |
+| DE users -> US users | German users | US users | Medium | Same metric shape, different user cohort. |
+| Joined users/orders -> all users | Users with matching orders or joined rows | All users | High | A join can exclude users without orders or multiply rows for users with many orders. |
+| Unique login users -> login event rows | Unique users who logged in | Login event rows | High | Repeated events by the same user can make row counts much larger than user counts. |
+| Non-deleted users -> all users | Users excluding deleted users | All users | Medium | Removing an exclusion can bring deleted users into the population. |
+| External users -> all users | Users excluding internal/test accounts | All users | Medium | Internal or test accounts can distort customer/user KPIs. |
+
 ## 🚀 Quick demo
 ```bash
 npx semantic-delta-detector \
@@ -46,7 +62,7 @@ Use semantic-delta-detector directly in VS Code through an extension that calls 
 
 ## 🧩 Features
 - SQL semantic comparison
-- Metadata-aware comparison
+- Optional metric metadata comparison
 - Similarity and risk scoring
 - Confidence and evidence reporting
 - Human-readable and JSON output
@@ -63,9 +79,5 @@ Use semantic-delta-detector directly in VS Code through an extension that calls 
 - A semantic early warning system for metric drift
 
 ## 📦 Status
-MVP with metadata-aware comparison (v2).
+MVP heuristic detector.
 Core comparison logic is structured and tested; SQL understanding is intentionally heuristic and still evolving.
-
-## 🔌 VS Code Extension
-Use the detector directly in your editor:
-https://github.com/Ryukanchi/semantic-delta-extension
