@@ -41,6 +41,9 @@ npx semantic-delta-detector \
   --demo
 ```
 
+## 🔌 VS Code Extension
+Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
+
 ## 🧩 Features
 - SQL semantic comparison
 - Metadata-aware comparison
@@ -50,7 +53,6 @@ npx semantic-delta-detector \
 - Tested comparison cases for core behavior
 
 ## 🛣️ Roadmap
-- VS Code extension integration
 - Improved SQL parsing
 - Richer semantic signals
 
