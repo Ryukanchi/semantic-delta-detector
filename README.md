@@ -48,6 +48,8 @@ Same-looking SQL changes can mean different KPIs. These examples show the kinds 
 | Unique login users -> login event rows | Unique users who logged in | Login event rows | High | Repeated events by the same user can make row counts much larger than user counts. |
 | Non-deleted users -> all users | Users excluding deleted users | All users | Medium | Removing an exclusion can bring deleted users into the population. |
 | External users -> all users | Users excluding internal/test accounts | All users | Medium | Internal or test accounts can distort customer/user KPIs. |
+| Daily login counts -> monthly login counts | Daily login event counts | Monthly login event counts | Medium | Same activity and aggregation, but different reporting grain; daily and monthly trend points are not directly comparable. |
+| LEFT JOIN users/orders -> INNER JOIN users/orders | All users with optional order matches | Users with matching order records | High | Changing LEFT JOIN to INNER JOIN can exclude users without orders and change population inclusion. |
 
 ## 🚀 Quick demo
 ```bash
