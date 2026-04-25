@@ -140,6 +140,45 @@ function compareJoinPopulation(
   };
 }
 
+function formatJoinType(type: ParsedSqlQuery["joinClauses"][number]["type"]): string {
+  if (type === "inner") {
+    return "INNER JOIN";
+  }
+
+  return `${type.toUpperCase()} JOIN`;
+}
+
+function compareJoinType(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference | null {
+  if (queryA.joinClauses.length === 0 || queryA.joinClauses.length !== queryB.joinClauses.length) {
+    return null;
+  }
+
+  for (let index = 0; index < queryA.joinClauses.length; index += 1) {
+    const joinA = queryA.joinClauses[index];
+    const joinB = queryB.joinClauses[index];
+
+    if (joinA.table !== joinB.table || joinA.type === joinB.type) {
+      continue;
+    }
+
+    const leftToInner = joinA.type === "left" && joinB.type === "inner";
+    const exclusionNote = leftToInner
+      ? "LEFT JOIN preserves users without matching orders, while INNER JOIN keeps only users with matching order records. Users without orders may be excluded in Query B."
+      : "Changing the join type can change which base-table records are preserved when there is no matching joined row.";
+
+    return {
+      category: "join_type_mismatch",
+      description: `The join type changed from ${formatJoinType(joinA.type)} to ${formatJoinType(joinB.type)} for ${joinA.table}. ${exclusionNote} Results may not be directly comparable.`,
+      impact: "high",
+    };
+  }
+
+  return null;
+}
+
 function compareTimeReference(
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
@@ -179,6 +218,53 @@ function compareTimeReference(
   }
 
   return null;
+}
+
+function inferReportingGrain(query: ParsedSqlQuery): string | null {
+  const groupText = query.groupByExpressions.join(" | ").toLowerCase();
+  if (!groupText) {
+    return null;
+  }
+
+  if (/\bdate_trunc\s*\(\s*['"]month['"]/.test(groupText)) {
+    return "monthly";
+  }
+
+  if (/\bdate_trunc\s*\(\s*['"]week['"]/.test(groupText)) {
+    return "weekly";
+  }
+
+  if (
+    /\bdate_trunc\s*\(\s*['"]day['"]/.test(groupText) ||
+    /\bdate\s*\(/.test(groupText) ||
+    /::\s*date\b/.test(groupText)
+  ) {
+    return "daily";
+  }
+
+  return query.groupByExpressions.length > 0 ? groupText : null;
+}
+
+function compareReportingGrain(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference | null {
+  const grainA = inferReportingGrain(queryA);
+  const grainB = inferReportingGrain(queryB);
+
+  if (!grainA && !grainB) {
+    return null;
+  }
+
+  if (grainA === grainB) {
+    return null;
+  }
+
+  return {
+    category: "reporting_grain_mismatch",
+    description: `The reporting grain changed from ${grainA || "ungrouped"} to ${grainB || "ungrouped"}. Daily, weekly, monthly, and ungrouped trend points are not directly comparable even when the table, filters, and aggregation match.`,
+    impact: "medium",
+  };
 }
 
 function compareActivityBasis(
@@ -516,8 +602,17 @@ function describeJoinPopulation(query: ParsedSqlQuery): string | null {
 
   const baseTable = query.tables[0];
   const joinedTables = query.tables.slice(1);
+  const firstJoinType = query.joinClauses[0]?.type;
 
   if (hasTableMatching(query, /\busers?\b/i) && hasTableMatching(query, /\borders?\b/i)) {
+    if (firstJoinType === "left") {
+      return "Measures all users with optional order matches / possible order data.";
+    }
+
+    if (firstJoinType === "inner") {
+      return "Measures users joined with orders / users with matching order records.";
+    }
+
     return "Measures users joined with orders / users with matching order records.";
   }
 
@@ -747,8 +842,9 @@ function compareMetricIntent(
   if (
     differences.some(
       (difference) =>
-        difference.category === "business_logic_mismatch" &&
-        /The JOIN can restrict the population/i.test(difference.description),
+        (difference.category === "business_logic_mismatch" &&
+          /The JOIN can restrict the population/i.test(difference.description)) ||
+        difference.category === "join_type_mismatch",
     )
   ) {
     return null;
@@ -790,6 +886,7 @@ function deriveEvidenceSources(
         "activity_basis_mismatch",
         "monetization_mismatch",
         "time_reference_mismatch",
+        "join_type_mismatch",
         "metric_intent_mismatch",
       ].includes(difference.category),
     );
@@ -904,15 +1001,21 @@ function buildMetadataContextNote(
 function buildBusinessMeaningSummary(query: ParsedSqlQuery, profile: QuerySemanticProfile): string {
   const eventFilter = query.filters.find((filter) => /\bevent\s*=\s*'[^']+'/i.test(filter));
   const eventName = eventFilter?.match(/'([^']+)'/)?.[1];
+  const reportingGrain = inferReportingGrain(query);
   const timeWindowLabel = formatTimeWindowLabel(profile.timeHorizon);
   const distinctUserOrRowCount = describeDistinctUserOrRowCount(query, timeWindowLabel);
   if (distinctUserOrRowCount) {
+    if (reportingGrain && query.aggregationDistinctTarget === "*") {
+      return `Measures ${reportingGrain} ${eventName} event counts.`;
+    }
+
     return distinctUserOrRowCount;
   }
 
   if (eventName) {
     const timePrefix = timeWindowLabel ? `${timeWindowLabel} ` : "";
-    return `Measures ${timePrefix}${eventName} events from ${query.tables.join(", ") || "the source dataset"}.`;
+    const grainPrefix = reportingGrain ? `${reportingGrain} ` : "";
+    return `Measures ${grainPrefix}${timePrefix}${eventName} events from ${query.tables.join(", ") || "the source dataset"}.`;
   }
 
   const joinPopulation = describeJoinPopulation(query);
@@ -983,6 +1086,9 @@ function buildExplanation(
       difference.category === "business_logic_mismatch" &&
       /The JOIN can restrict the population/i.test(difference.description),
   );
+  const joinTypeDifference = differences.find(
+    (difference) => difference.category === "join_type_mismatch",
+  );
   const segmentDifference = differences.find(
     (difference) =>
       difference.category === "business_logic_mismatch" &&
@@ -1015,6 +1121,9 @@ function buildExplanation(
       difference.category === "time_reference_mismatch" &&
       /different recency windows/i.test(difference.description),
   );
+  const reportingGrainDifference = differences.find(
+    (difference) => difference.category === "reporting_grain_mismatch",
+  );
 
   if (removedExclusionDifference) {
     return `${broadEntityText}, but removing the exclusion filter broadens the population. ${removedExclusionDifference.description} ${evidenceNote}${metadataContextNote}`;
@@ -1026,6 +1135,10 @@ function buildExplanation(
 
   if (joinPopulationDifference) {
     return `${broadEntityText}, but the JOIN changes the measured population. ${joinPopulationDifference.description} This means the metric may count joined rows or users with matching joined records rather than all base-table users. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (joinTypeDifference) {
+    return `${broadEntityText}, but the join type changes population inclusion. ${joinTypeDifference.description} ${evidenceNote}${metadataContextNote}`;
   }
 
   if (segmentDifference) {
@@ -1050,6 +1163,10 @@ function buildExplanation(
 
   if (timeWindowDifference) {
     return `${broadEntityText}, and the event concept is aligned, but the reporting window differs. ${timeWindowDifference.description} This changes which period the metric represents even though the underlying activity is the same. ${evidenceNote}${metadataContextNote}`;
+  }
+
+  if (reportingGrainDifference) {
+    return `${broadEntityText}, and the activity concept is aligned, but the reporting grain differs. ${reportingGrainDifference.description} This changes the meaning of each trend point even though the underlying activity is the same. ${evidenceNote}${metadataContextNote}`;
   }
 
   if (profileA.primaryDimension !== profileB.primaryDimension) {
@@ -1110,6 +1227,14 @@ function buildRecommendation(
 
   if (joinPopulationDifference) {
     return "Confirm whether the JOIN is intentional. Do not compare joined user-order counts with all-user counts without documenting whether the metric counts users, orders, or joined rows.";
+  }
+
+  const joinTypeDifference = differences.find(
+    (difference) => difference.category === "join_type_mismatch",
+  );
+
+  if (joinTypeDifference) {
+    return "Confirm whether the join-type change is intentional. Do not compare LEFT JOIN and INNER JOIN user-order counts without documenting whether users without orders should be included.";
   }
 
   const segmentDifference = differences.find(
@@ -1187,6 +1312,14 @@ function buildRecommendation(
     return buildTimeWindowRecommendation(timeWindowDifference);
   }
 
+  const reportingGrainDifference = differences.find(
+    (difference) => difference.category === "reporting_grain_mismatch",
+  );
+
+  if (reportingGrainDifference) {
+    return "Confirm whether the reporting-grain change is intentional. Do not compare daily and monthly login counts in the same trendline without documenting the grain.";
+  }
+
   if (categories.has("time_reference_mismatch")) {
     return "Document which timestamp defines recency for this metric. Teams should align on whether the intended basis is event activity, account state, or another operational clock.";
   }
@@ -1227,7 +1360,9 @@ export function compareMetricDefinitions(
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
+  pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));
+  pushDifference(detectedDifferences, compareReportingGrain(parsedA, parsedB));
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
   pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
   pushDifference(detectedDifferences, compareBusinessLogic(parsedA, parsedB, profileA, profileB));

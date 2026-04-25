@@ -164,6 +164,42 @@ test("login event time-window changes are called out without changing event conc
   assert.match(result.recommendation, /7-day and 30-day counts/i);
 });
 
+test("reporting grain changes are called out without changing event concept", () => {
+  const result = compareSqlQueries(
+    "SELECT DATE(created_at), COUNT(*) FROM events WHERE event = 'login' GROUP BY DATE(created_at)",
+    "SELECT DATE_TRUNC('month', created_at), COUNT(*) FROM events WHERE event = 'login' GROUP BY DATE_TRUNC('month', created_at)",
+  );
+
+  assert.equal(result.risk_level, "medium");
+  assert.equal(result.confidence_level, "medium");
+  assert.match(result.likely_business_meaning_a, /daily login event counts/i);
+  assert.match(result.likely_business_meaning_b, /monthly login event counts/i);
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "reporting_grain_mismatch" &&
+        difference.impact === "medium" &&
+        /reporting grain changed from daily to monthly/i.test(difference.description) &&
+        /trend points are not directly comparable/i.test(difference.description),
+    ),
+  );
+  assert.ok(
+    !result.detected_differences.some(
+      (difference) => difference.category === "aggregation_mismatch",
+    ),
+  );
+  assert.ok(
+    !result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        /all events/i.test(difference.description),
+    ),
+  );
+  assert.match(result.explanation, /reporting grain differs/i);
+  assert.match(result.recommendation, /reporting-grain change is intentional/i);
+  assert.match(result.recommendation, /daily and monthly login counts/i);
+});
+
 test("count of paid orders vs paid order revenue is explained as measure change", () => {
   const result = compareSqlQueries(
     "SELECT COUNT(*) FROM orders WHERE status = 'paid'",
@@ -291,6 +327,43 @@ test("joins to another table are treated as population risk", () => {
   assert.match(result.explanation, /joined rows or users with matching joined records/i);
   assert.match(result.recommendation, /Confirm whether the JOIN is intentional/i);
   assert.match(result.recommendation, /counts users, orders, or joined rows/i);
+});
+
+test("join type changes are treated as population inclusion risk", () => {
+  const result = compareSqlQueries(
+    "SELECT COUNT(*) FROM users u LEFT JOIN orders o ON u.id = o.user_id",
+    "SELECT COUNT(*) FROM users u JOIN orders o ON u.id = o.user_id",
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.match(result.likely_business_meaning_a, /all users with optional order matches/i);
+  assert.match(result.likely_business_meaning_a, /possible order data/i);
+  assert.match(result.likely_business_meaning_b, /users with matching order records/i);
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "join_type_mismatch" &&
+        difference.impact === "high" &&
+        /join type changed from LEFT JOIN to INNER JOIN/i.test(difference.description) &&
+        /users without orders may be excluded in Query B/i.test(difference.description) &&
+        /not be directly comparable/i.test(difference.description),
+    ),
+  );
+  assert.ok(
+    !result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        /reads only users/i.test(difference.description),
+    ),
+  );
+  assert.ok(
+    !result.detected_differences.some(
+      (difference) => difference.category === "metric_intent_mismatch",
+    ),
+  );
+  assert.match(result.explanation, /join type changes population inclusion/i);
+  assert.match(result.recommendation, /join-type change is intentional/i);
+  assert.match(result.recommendation, /users without orders should be included/i);
 });
 
 test("distinct user count vs event row count is treated as counted-unit change", () => {

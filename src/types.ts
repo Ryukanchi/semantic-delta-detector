@@ -13,6 +13,8 @@ export type DifferenceCategory =
   | "activity_basis_mismatch"
   | "monetization_mismatch"
   | "time_reference_mismatch"
+  | "reporting_grain_mismatch"
+  | "join_type_mismatch"
   | "aggregation_mismatch"
   | "metric_intent_mismatch"
   | "team_context_mismatch"
@@ -37,9 +39,16 @@ export interface ParsedSqlQuery {
   aggregationDistinctTarget: string | null;
   metricName: string;
   whereClause: string | null;
+  groupByExpressions: string[];
+  joinClauses: SqlJoinClause[];
   filters: string[];
   timeWindows: string[];
   conditions: string[];
+}
+
+export interface SqlJoinClause {
+  type: "inner" | "left" | "right" | "full" | "cross";
+  table: string;
 }
 
 export interface DetectedDifference {

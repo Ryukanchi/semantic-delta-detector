@@ -7,6 +7,8 @@ function getCategoryLabel(category: string): string {
     activity_basis_mismatch: "Activity Basis",
     monetization_mismatch: "Monetization",
     time_reference_mismatch: "Time Reference",
+    reporting_grain_mismatch: "Reporting Grain",
+    join_type_mismatch: "Join Type",
     aggregation_mismatch: "Aggregation",
     metric_intent_mismatch: "Metric Intent",
     team_context_mismatch: "Team Context",

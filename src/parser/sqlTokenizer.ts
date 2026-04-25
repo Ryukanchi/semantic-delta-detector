@@ -1,4 +1,4 @@
-import { ParsedSqlQuery } from "../types.js";
+import { ParsedSqlQuery, SqlJoinClause } from "../types.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
 
@@ -37,6 +37,41 @@ function splitConditions(whereClause: string | null): string[] {
 function extractTables(query: string): string[] {
   const matches = [...query.matchAll(/\b(?:from|join)\s+([a-zA-Z0-9_."]+)/gi)];
   return dedupe(matches.map((match) => match[1].replace(/"/g, "")));
+}
+
+function normalizeJoinType(input: string | undefined): SqlJoinClause["type"] {
+  const normalized = (input || "inner").trim().toLowerCase();
+
+  if (normalized.startsWith("left")) {
+    return "left";
+  }
+
+  if (normalized.startsWith("right")) {
+    return "right";
+  }
+
+  if (normalized.startsWith("full")) {
+    return "full";
+  }
+
+  if (normalized.startsWith("cross")) {
+    return "cross";
+  }
+
+  return "inner";
+}
+
+function extractJoinClauses(query: string): SqlJoinClause[] {
+  const matches = [
+    ...query.matchAll(
+      /\b(?:(left|right|full|inner|cross)(?:\s+outer)?\s+)?join\s+([a-zA-Z0-9_."]+)/gi,
+    ),
+  ];
+
+  return matches.map((match) => ({
+    type: normalizeJoinType(match[1]),
+    table: match[2].replace(/"/g, ""),
+  }));
 }
 
 function extractSelectExpressions(query: string): string[] {
@@ -89,6 +124,22 @@ function extractWhereClause(query: string): string | null {
   );
 
   return match ? normalizeWhitespace(match[1]) : null;
+}
+
+function extractGroupByExpressions(query: string): string[] {
+  const match = query.match(
+    /\bgroup\s+by\b\s+(.+?)(?=\border\s+by\b|\bhaving\b|\blimit\b|$)/is,
+  );
+  if (!match) {
+    return [];
+  }
+
+  return dedupe(
+    match[1]
+      .split(",")
+      .map((part) => normalizeWhitespace(part))
+      .filter(Boolean),
+  );
 }
 
 function extractTimeWindows(conditions: string[]): string[] {
@@ -151,9 +202,11 @@ function inferMetricName(query: string, tables: string[], conditions: string[]):
 export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
   const normalizedQuery = normalizeWhitespace(rawQuery);
   const tables = extractTables(normalizedQuery);
+  const joinClauses = extractJoinClauses(normalizedQuery);
   const selectedExpressions = extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
   const whereClause = extractWhereClause(normalizedQuery);
+  const groupByExpressions = extractGroupByExpressions(normalizedQuery);
   const conditions = splitConditions(whereClause);
   const timeWindows = extractTimeWindows(conditions);
   const filters = extractFilters(conditions);
@@ -168,6 +221,8 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
     aggregationDistinctTarget,
     metricName,
     whereClause,
+    groupByExpressions,
+    joinClauses,
     filters,
     timeWindows,
     conditions,

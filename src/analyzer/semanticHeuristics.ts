@@ -310,6 +310,16 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
     score -= 8;
   }
 
+  if (queryA.groupByExpressions.join("|") !== queryB.groupByExpressions.join("|")) {
+    score -= 10;
+  }
+
+  const joinTypesA = queryA.joinClauses.map((join) => `${join.table}:${join.type}`).join("|");
+  const joinTypesB = queryB.joinClauses.map((join) => `${join.table}:${join.type}`).join("|");
+  if (joinTypesA !== joinTypesB) {
+    score -= 15;
+  }
+
   if (profileA.primaryDimension !== profileB.primaryDimension) {
     score -= 25;
   } else if (profileA.businessMeaning !== profileB.businessMeaning) {
