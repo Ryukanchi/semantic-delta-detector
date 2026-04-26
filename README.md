@@ -69,6 +69,30 @@ npx semantic-delta-detector \
   --demo
 ```
 
+## Pull Request Simulation
+Preview the kind of short review comment Semantic Delta could add to a pull request. This local mode does not call the GitHub API yet; it reads before/after SQL files and prints a PR-style risk comment.
+
+```bash
+npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
+```
+
+Files used:
+- `examples/pr-before.sql`
+- `examples/pr-after.sql`
+
+Example output:
+```text
+🔴 HIGH RISK
+This change alters the meaning of the metric.
+
+Impact: aggregation changes may change what is counted.
+Evidence:
+- Aggregation changed from COUNT(DISTINCT user_id) to COUNT(*).
+Recommendation: Do not compare unique-user login counts with login event-row counts as the same KPI. Confirm whether the metric is intended to count users or events.
+```
+
+This is the bridge toward a future GitHub Action or PR bot.
+
 ## 🔌 VS Code Extension
 Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
 
