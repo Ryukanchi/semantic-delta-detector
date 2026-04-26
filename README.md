@@ -1,5 +1,11 @@
 # semantic-delta-detector
 
+## 🚨 Example: Decision Report
+
+![Decision Report](docs/assets/decision-report.png)
+
+Same SQL. Different meaning. High-risk metric drift caught early.
+
 ## 🚨 What this solves
 A dashboard can show “active users” in two places and hide two different definitions.
 One team may count product logins.
@@ -10,12 +16,16 @@ semantic-delta-detector catches that drift before teams compare incompatible KPI
 ## 🔍 Example (the hook)
 Two SQL queries can look similar, share a metric name, and still answer different business questions.
 
-![Demo Output](docs/assets/demo-output.png)
-
 Same metric name. Different business meaning. A dashboard mistake caught early.
 
+## 🔍 Detailed Analysis Example
+
+This is a more detailed breakdown of the semantic comparison output.
+
+![Demo Output](docs/assets/demo-output.png)
+
 ## 💡 What it does
-- Detects semantic differences between SQL queries
+- Acts as a semantic risk engine for SQL metric changes
 - Identifies mismatches in business meaning
 - Outputs similarity, risk, confidence, and explanation
 - Can use optional metric metadata when provided
@@ -63,7 +73,7 @@ npx semantic-delta-detector \
 Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
 
 ## 🧩 Features
-- SQL semantic comparison
+- Semantic risk detection for SQL metric changes
 - Optional metric metadata comparison
 - Similarity and risk scoring
 - Confidence and evidence reporting
