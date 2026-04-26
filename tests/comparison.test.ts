@@ -693,6 +693,95 @@ test("unknown CLI example lists newly added examples", () => {
   );
 });
 
+test("CLI PR simulation reads before and after SQL files", () => {
+  const output = execFileSync(
+    "npm",
+    [
+      "run",
+      "compare",
+      "--",
+      "--before",
+      "./examples/pr-before.sql",
+      "--after",
+      "./examples/pr-after.sql",
+      "--pr",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: "pipe",
+    },
+  );
+
+  assert.match(output, /🔴 HIGH RISK/);
+  assert.match(output, /Aggregation changed from COUNT\(DISTINCT user_id\) to COUNT\(\*\)\./);
+  assert.match(output, /Confirm whether the metric is intended to count users or events\./);
+});
+
+test("CLI PR simulation requires both before and after files", () => {
+  assert.throws(
+    () =>
+      execFileSync(
+        "npm",
+        ["run", "compare", "--", "--before", "./examples/pr-before.sql", "--pr"],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      ),
+    /Provide both --before and --after for PR simulation/,
+  );
+});
+
+test("CLI PR simulation reports missing before and after files clearly", () => {
+  assert.throws(
+    () =>
+      execFileSync(
+        "npm",
+        [
+          "run",
+          "compare",
+          "--",
+          "--before",
+          "./examples/missing-before.sql",
+          "--after",
+          "./examples/pr-after.sql",
+          "--pr",
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      ),
+    /Before file does not exist: \.\/examples\/missing-before\.sql/,
+  );
+
+  assert.throws(
+    () =>
+      execFileSync(
+        "npm",
+        [
+          "run",
+          "compare",
+          "--",
+          "--before",
+          "./examples/pr-before.sql",
+          "--after",
+          "./examples/missing-after.sql",
+          "--pr",
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      ),
+    /After file does not exist: \.\/examples\/missing-after\.sql/,
+  );
+});
+
 test("cli reports friendly validation errors for malformed json metadata", () => {
   const dir = mkdtempSync(join(tmpdir(), "sdd-"));
   const badAPath = join(dir, "bad-a.json");

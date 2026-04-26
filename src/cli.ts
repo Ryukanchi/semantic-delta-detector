@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { compareMetricDefinitions } from "./analyzer/differenceEngine.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
@@ -13,6 +13,8 @@ interface CliOptions {
   queryB?: string;
   fileA?: string;
   fileB?: string;
+  beforeFile?: string;
+  afterFile?: string;
   jsonA?: string;
   jsonB?: string;
   example?: string;
@@ -27,6 +29,7 @@ function printHelp(): void {
 Usage:
   pnpm compare --query-a "SELECT ..." --query-b "SELECT ..."
   pnpm compare --file-a ./query-a.sql --file-b ./query-b.sql
+  pnpm compare --before ./examples/before.sql --after ./examples/after.sql --pr
   pnpm compare --example login-vs-paid
 
 Options:
@@ -34,6 +37,8 @@ Options:
   --query-b     Inline SQL query B
   --file-a      Path to SQL file A
   --file-b      Path to SQL file B
+  --before      Path to the before SQL file for PR simulation
+  --after       Path to the after SQL file for PR simulation
   --json-a      Path to JSON metric definition A
   --json-b      Path to JSON metric definition B
   --example     Run a bundled example
@@ -66,6 +71,20 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--file-b":
         options.fileB = next;
+        index += 1;
+        break;
+      case "--before":
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing file path for --before.");
+        }
+        options.beforeFile = next;
+        index += 1;
+        break;
+      case "--after":
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing file path for --after.");
+        }
+        options.afterFile = next;
         index += 1;
         break;
       case "--json-a":
@@ -104,8 +123,18 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-function readSqlFromFile(filePath: string): string {
-  return readFileSync(resolve(process.cwd(), filePath), "utf8").trim();
+function readSqlFromFile(filePath: string, label = "SQL"): string {
+  const resolvedPath = resolve(process.cwd(), filePath);
+
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`${label} file does not exist: ${filePath}`);
+  }
+
+  if (!statSync(resolvedPath).isFile()) {
+    throw new Error(`${label} path is not a file: ${filePath}`);
+  }
+
+  return readFileSync(resolvedPath, "utf8").trim();
 }
 
 function readMetricDefinitionFromJson(filePath: string): MetricDefinitionInput {
@@ -134,6 +163,21 @@ function readMetricDefinitionFromJson(filePath: string): MetricDefinitionInput {
 }
 
 function resolveInputs(options: CliOptions): { inputA: MetricDefinitionInput; inputB: MetricDefinitionInput } {
+  if (options.beforeFile || options.afterFile) {
+    if (!options.beforeFile || !options.afterFile) {
+      throw new Error("Provide both --before and --after for PR simulation.");
+    }
+
+    return {
+      inputA: {
+        query: readSqlFromFile(options.beforeFile, "Before"),
+      },
+      inputB: {
+        query: readSqlFromFile(options.afterFile, "After"),
+      },
+    };
+  }
+
   if (options.example) {
     const example = exampleQueryPairs.find((item) => item.id === options.example);
     if (!example) {
@@ -160,13 +204,13 @@ function resolveInputs(options: CliOptions): { inputA: MetricDefinitionInput; in
     options.jsonA
       ? readMetricDefinitionFromJson(options.jsonA)
       : {
-          query: options.queryA ?? (options.fileA ? readSqlFromFile(options.fileA) : ""),
+          query: options.queryA ?? (options.fileA ? readSqlFromFile(options.fileA, "Query A") : ""),
         };
   const inputB =
     options.jsonB
       ? readMetricDefinitionFromJson(options.jsonB)
       : {
-          query: options.queryB ?? (options.fileB ? readSqlFromFile(options.fileB) : ""),
+          query: options.queryB ?? (options.fileB ? readSqlFromFile(options.fileB, "Query B") : ""),
         };
 
   if (!inputA.query || !inputB.query) {
