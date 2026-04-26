@@ -57,6 +57,14 @@ export interface DetectedDifference {
   impact: "low" | "medium" | "high";
 }
 
+export interface ImpactLayer {
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  decisionRisk: string;
+  affectedMeaning: string;
+  recommendedAction: string;
+  evidence: string[];
+}
+
 export interface QuerySemanticProfile {
   primaryDimension: BusinessDimension;
   secondaryDimensions: BusinessDimension[];
@@ -87,6 +95,8 @@ export interface SemanticComparisonResult {
   evidence_sources: EvidenceSource[];
   explanation: string;
   recommendation: string;
+  verdict?: string;
+  impact?: ImpactLayer;
 }
 
 export interface ExampleQueryPair {

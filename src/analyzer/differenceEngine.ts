@@ -10,6 +10,7 @@ import {
   ConfidenceLevel,
   DetectedDifference,
   EvidenceSource,
+  ImpactLayer,
   MetricDefinitionInput,
   ParsedSqlQuery,
   QuerySemanticProfile,
@@ -1339,6 +1340,100 @@ function buildRecommendation(
   return "These metrics are reasonably aligned, but keep a written definition so future changes do not create semantic drift.";
 }
 
+function mapRiskToSeverity(riskLevel: RiskLevel): ImpactLayer["severity"] {
+  if (riskLevel === "high") {
+    return "HIGH";
+  }
+
+  if (riskLevel === "medium") {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function hasAggregationMismatch(differences: DetectedDifference[]): boolean {
+  return differences.some((difference) => difference.category === "aggregation_mismatch");
+}
+
+function hasFilterRemoval(differences: DetectedDifference[]): boolean {
+  return differences.some(
+    (difference) =>
+      /removes? (?:the )?(?:filter|exclusion filter|monetization gate|filter logic)/i.test(
+        difference.description,
+      ) || /filter removal/i.test(difference.description),
+  );
+}
+
+function hasJoinChange(differences: DetectedDifference[]): boolean {
+  return differences.some(
+    (difference) =>
+      difference.category === "join_type_mismatch" ||
+      /JOIN/i.test(difference.description),
+  );
+}
+
+function buildDecisionRisk(differences: DetectedDifference[]): string {
+  const risks: string[] = [];
+
+  if (hasAggregationMismatch(differences)) {
+    risks.push("aggregation changes may change what is counted");
+  }
+
+  if (hasFilterRemoval(differences)) {
+    risks.push("filter removal may alter the metric population");
+  }
+
+  if (hasJoinChange(differences)) {
+    risks.push("join changes may include or exclude users and change row counts");
+  }
+
+  if (risks.length === 0 && differences.length > 0) {
+    return "Definition differences may affect decisions if the metrics are treated as interchangeable.";
+  }
+
+  if (risks.length === 0) {
+    return "No major decision risk detected from semantic differences.";
+  }
+
+  return `Decision risk: ${risks.join("; ")}.`;
+}
+
+function stripTrailingPeriod(text: string): string {
+  return text.replace(/\.+$/, "");
+}
+
+function formatMeaningSummary(text: string): string {
+  return stripTrailingPeriod(text).replace(/^Measures\s+/i, "");
+}
+
+export function buildImpactLayer(result: SemanticComparisonResult): ImpactLayer {
+  return {
+    severity: mapRiskToSeverity(result.risk_level),
+    decisionRisk: buildDecisionRisk(result.detected_differences),
+    affectedMeaning: `Query A: ${formatMeaningSummary(
+      result.likely_business_meaning_a,
+    )}; Query B: ${formatMeaningSummary(result.likely_business_meaning_b)}.`,
+    recommendedAction: result.recommendation,
+    evidence: result.detected_differences.map((difference) => difference.description),
+  };
+}
+
+export function buildVerdict(
+  result: SemanticComparisonResult,
+  impact: ImpactLayer,
+): string {
+  if (impact.severity === "CRITICAL" || result.risk_level === "high") {
+    return "HIGH RISK: This change alters the meaning of the metric.";
+  }
+
+  if (result.risk_level === "medium") {
+    return "MEDIUM RISK: This change may affect how the metric is interpreted.";
+  }
+
+  return "LOW RISK: This change is unlikely to alter the meaning of the metric.";
+}
+
 export function compareMetricDefinitions(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
@@ -1385,7 +1480,7 @@ export function compareMetricDefinitions(
   );
   const confidenceLevel = inferConfidenceLevel(evidenceSources, detectedDifferences);
 
-  return {
+  const result: SemanticComparisonResult = {
     metric_name_a: getDisplayMetricName(normalizedInputA, parsedA),
     metric_name_b: getDisplayMetricName(normalizedInputB, parsedB),
     semantic_similarity_score: semanticSimilarityScore,
@@ -1411,6 +1506,13 @@ export function compareMetricDefinitions(
       profileB,
       detectedDifferences,
     ),
+  };
+  const impact = buildImpactLayer(result);
+
+  return {
+    ...result,
+    verdict: buildVerdict(result, impact),
+    impact,
   };
 }
 

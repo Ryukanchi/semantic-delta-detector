@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { compareMetricDefinitions } from "./analyzer/differenceEngine.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
+import { formatPrComment } from "./output/formatPrComment.js";
 import { formatDemoReport, formatReadableReport } from "./output/formatReport.js";
 import { MetricDefinitionInput } from "./types.js";
 
@@ -17,6 +18,7 @@ interface CliOptions {
   example?: string;
   format: "json" | "text";
   demo: boolean;
+  pr: boolean;
 }
 
 function printHelp(): void {
@@ -36,13 +38,14 @@ Options:
   --json-b      Path to JSON metric definition B
   --example     Run a bundled example
   --demo        Show high-impact demo output
+  --pr          Show a short GitHub PR-style comment
   --format      json | text (default: text)
   --help        Show this message
 `);
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { format: "text", demo: false };
+  const options: CliOptions = { format: "text", demo: false, pr: false };
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -85,6 +88,9 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--demo":
         options.demo = true;
+        break;
+      case "--pr":
+        options.pr = true;
         break;
       case "--help":
       case "-h":
@@ -183,12 +189,17 @@ function main(): void {
       return;
     }
 
+    if (options.pr) {
+      console.log(formatPrComment(result));
+      return;
+    }
+
     if (options.demo) {
       console.log(formatDemoReport(result));
       return;
     }
 
-    console.log(formatReadableReport(result));
+    console.log(formatReadableReport(result, inputA.query, inputB.query));
     console.log("");
     console.log("JSON Output");
     console.log("-----------");

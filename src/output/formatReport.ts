@@ -33,33 +33,68 @@ function sortFindingsByImportance(result: SemanticComparisonResult) {
   });
 }
 
-export function formatReadableReport(result: SemanticComparisonResult): string {
-  const differenceLines =
-    result.detected_differences.length === 0
-      ? ["- No meaningful semantic differences detected."]
-      : sortFindingsByImportance(result).map(
-          (difference) =>
-            `- [${difference.impact.toUpperCase()}] ${getCategoryLabel(difference.category)}: ${difference.description}`,
-        );
+function formatEvidence(result: SemanticComparisonResult): string[] {
+  if (result.impact?.evidence.length) {
+    return result.impact.evidence.map((evidence) => `- ${evidence}`);
+  }
+
+  if (result.detected_differences.length === 0) {
+    return ["- No meaningful semantic differences detected."];
+  }
+
+  return sortFindingsByImportance(result).map(
+    (difference) =>
+      `- [${difference.impact.toUpperCase()}] ${getCategoryLabel(difference.category)}: ${difference.description}`,
+  );
+}
+
+function formatSqlBlock(query: string | undefined): string[] {
+  return [
+    "```sql",
+    query?.trim() || "-- Query text not available in this formatted result.",
+    "```",
+  ];
+}
+
+export function formatReadableReport(
+  result: SemanticComparisonResult,
+  queryA?: string,
+  queryB?: string,
+): string {
+  const verdict = result.verdict || "No significant semantic risk detected.";
+  const businessImpact =
+    result.impact?.decisionRisk || "No significant business impact detected.";
+  const recommendation = result.impact?.recommendedAction || result.recommendation;
 
   return [
-    "Semantic Delta Report",
-    "=====================",
-    `Metric A: ${result.metric_name_a}`,
-    `Metric B: ${result.metric_name_b}`,
-    `Similarity Score: ${result.semantic_similarity_score}/100`,
-    `Risk Level: ${result.risk_level}`,
-    `Confidence: ${result.confidence_level}`,
-    `Evidence: ${result.evidence_sources.join(", ")}`,
+    "# Semantic Delta Result",
     "",
-    `Likely Meaning A: ${result.likely_business_meaning_a}`,
-    `Likely Meaning B: ${result.likely_business_meaning_b}`,
+    "## Verdict",
+    verdict,
     "",
-    "Key Findings:",
-    ...differenceLines,
+    "## Business Impact",
+    businessImpact,
     "",
-    `Explanation: ${result.explanation}`,
-    `Recommendation: ${result.recommendation}`,
+    "## Summary",
+    `- Similarity: ${result.semantic_similarity_score}/100`,
+    `- Risk: ${result.risk_level}`,
+    `- Confidence: ${result.confidence_level}`,
+    "",
+    "## Evidence",
+    ...formatEvidence(result),
+    "",
+    "## Business Meaning",
+    `- Query A (${result.metric_name_a}): ${result.likely_business_meaning_a}`,
+    `- Query B (${result.metric_name_b}): ${result.likely_business_meaning_b}`,
+    "",
+    "## Recommendation",
+    recommendation,
+    "",
+    "## Query A",
+    ...formatSqlBlock(queryA),
+    "",
+    "## Query B",
+    ...formatSqlBlock(queryB),
   ].join("\n");
 }
 

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { compareMetricDefinitions, compareSqlQueries } from "../src/analyzer/differenceEngine.js";
 import { fixtures } from "./fixtures.js";
+import { formatPrComment } from "../src/output/formatPrComment.js";
+import { formatReadableReport } from "../src/output/formatReport.js";
 
 test("happy path returns strong similarity for equivalent queries", () => {
   const result = compareMetricDefinitions(fixtures.happyPath.inputA, fixtures.happyPath.inputB);
@@ -88,6 +90,19 @@ test("removed where filter explains broader measured population", () => {
   assert.match(result.explanation, /not just the SQL shape/i);
   assert.match(result.recommendation, /Confirm whether removing the filter is intentional/i);
   assert.match(result.recommendation, /Downstream dashboards/i);
+  assert.equal(
+    result.verdict,
+    "MEDIUM RISK: This change may affect how the metric is interpreted.",
+  );
+  assert.ok(result.impact);
+  assert.equal(result.impact.severity, "MEDIUM");
+  assert.match(result.impact.decisionRisk, /filter removal may alter the metric population/i);
+  assert.match(result.impact.affectedMeaning, /Query A: .*login events.*Query B: .*all events/i);
+  assert.equal(result.impact.recommendedAction, result.recommendation);
+  assert.deepEqual(
+    result.impact.evidence,
+    result.detected_differences.map((difference) => difference.description),
+  );
 });
 
 test("paid users vs all users focuses on monetization gate removal", () => {
@@ -327,6 +342,15 @@ test("joins to another table are treated as population risk", () => {
   assert.match(result.explanation, /joined rows or users with matching joined records/i);
   assert.match(result.recommendation, /Confirm whether the JOIN is intentional/i);
   assert.match(result.recommendation, /counts users, orders, or joined rows/i);
+  assert.equal(result.verdict, "HIGH RISK: This change alters the meaning of the metric.");
+  assert.ok(result.impact);
+  assert.equal(result.impact.severity, "HIGH");
+  assert.match(result.impact.decisionRisk, /join changes may include or exclude users and change row counts/i);
+  assert.ok(
+    result.detected_differences.every((difference) =>
+      result.impact?.evidence.includes(difference.description),
+    ),
+  );
 });
 
 test("join type changes are treated as population inclusion risk", () => {
@@ -563,6 +587,110 @@ test("partial metadata is called out accurately in the explanation", () => {
   assert.ok(result.evidence_sources.includes("description"));
   assert.match(result.explanation, /Partial metadata was available\./);
   assert.match(result.explanation, /Available on only one side: team context, intended use\./);
+});
+
+test("readable report prioritizes verdict and impact with query blocks", () => {
+  const queryA = "SELECT COUNT(*) FROM users WHERE status != 'deleted'";
+  const queryB = "SELECT COUNT(*) FROM users";
+  const result = compareSqlQueries(queryA, queryB);
+  const report = formatReadableReport(result, queryA, queryB);
+
+  assert.match(report, /^# Semantic Delta Result/);
+  assert.match(report, /## Verdict\nMEDIUM RISK: This change may affect how the metric is interpreted\./);
+  assert.match(report, /## Business Impact\nDecision risk: filter removal may alter the metric population\./);
+  assert.match(report, /## Summary\n- Similarity: \d+\/100\n- Risk: medium\n- Confidence: \w+/);
+  assert.match(report, /## Evidence\n- Query B removes the exclusion filter from Query A/i);
+  assert.match(report, /## Recommendation\nConfirm whether including deleted users is intentional\./);
+  assert.match(report, /## Query A\n```sql\nSELECT COUNT\(\*\) FROM users WHERE status != 'deleted'\n```/);
+  assert.match(report, /## Query B\n```sql\nSELECT COUNT\(\*\) FROM users\n```/);
+});
+
+test("readable report falls back when verdict and impact are unavailable", () => {
+  const result = compareSqlQueries("SELECT COUNT(*) FROM users", "SELECT COUNT(*) FROM users");
+  const legacyResult = {
+    ...result,
+    verdict: undefined,
+    impact: undefined,
+  };
+  const report = formatReadableReport(legacyResult);
+
+  assert.match(report, /## Verdict\nNo significant semantic risk detected\./);
+  assert.match(report, /## Business Impact\nNo significant business impact detected\./);
+  assert.match(report, /## Evidence\n- No meaningful semantic differences detected\./);
+  assert.match(report, /## Query A\n```sql\n-- Query text not available in this formatted result\.\n```/);
+});
+
+test("PR comment formatter returns a short actionable comment", () => {
+  const result = compareSqlQueries(
+    "SELECT COUNT(DISTINCT user_id) FROM events WHERE event = 'login'",
+    "SELECT COUNT(*) FROM events WHERE event = 'login'",
+  );
+  const comment = formatPrComment(result);
+
+  assert.match(comment, /^🔴 HIGH RISK\nThis change alters the meaning of the metric\./);
+  assert.match(comment, /Impact: aggregation changes may change what is counted\./);
+  assert.doesNotMatch(comment, /Impact: (Decision risk|Decision Risk|Risk):/);
+  assert.match(comment, /Evidence:\n- Aggregation changed from COUNT\(DISTINCT user_id\) to COUNT\(\*\)\./);
+  assert.match(comment, /Recommendation: Do not compare unique-user login counts/i);
+  assert.doesNotMatch(comment, /## Summary|Key Findings|Business Meaning/);
+  assert.ok(comment.split("\n").filter((line) => line.startsWith("- ")).length <= 2);
+  assert.ok(comment.split("\n").length <= 10);
+});
+
+test("PR comment keeps evidence aligned with the recommendation", () => {
+  const result = compareMetricDefinitions(
+    {
+      metric_name: "login_users",
+      query: "SELECT COUNT(DISTINCT user_id) FROM events WHERE event = 'login'",
+    },
+    {
+      metric_name: "paid_active_users",
+      query: "SELECT COUNT(*) FROM users WHERE subscription_status = 'paid'",
+    },
+  );
+  const comment = formatPrComment(result);
+
+  assert.match(comment, /Impact: .*filter removal may alter the metric population\./);
+  assert.doesNotMatch(comment, /Impact: (Decision risk|Decision Risk|Risk):/);
+  assert.match(comment, /Evidence:\n- Query B removes filter logic from Query A/);
+  assert.match(comment, /Recommendation: Confirm whether removing the filter is intentional\./);
+  assert.ok(comment.split("\n").filter((line) => line.startsWith("- ")).length <= 2);
+});
+
+test("CLI PR examples include validated semantic cases", () => {
+  const output = execFileSync(
+    "npm",
+    [
+      "run",
+      "compare",
+      "--",
+      "--example",
+      "unique-login-users-vs-login-event-rows",
+      "--pr",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: "pipe",
+    },
+  );
+
+  assert.match(output, /🔴 HIGH RISK/);
+  assert.match(output, /Impact: aggregation changes may change what is counted\./);
+  assert.match(output, /Evidence:\n- Aggregation changed from COUNT\(DISTINCT user_id\) to COUNT\(\*\)\./);
+  assert.match(output, /Recommendation: Do not compare unique-user login counts/i);
+});
+
+test("unknown CLI example lists newly added examples", () => {
+  assert.throws(
+    () =>
+      execFileSync("npm", ["run", "compare", "--", "--example", "missing-example"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: "pipe",
+      }),
+    /Available examples: .*unique-login-users-vs-login-event-rows.*paid-users-vs-all-users.*daily-login-counts-vs-monthly-login-counts.*left-join-vs-inner-join/,
+  );
 });
 
 test("cli reports friendly validation errors for malformed json metadata", () => {
