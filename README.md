@@ -101,6 +101,8 @@ This is the bridge toward a future GitHub Action or PR bot.
 
 A preview GitHub Actions workflow is included at `.github/workflows/semantic-delta-preview.yml`. It runs the local PR simulation and prints the PR-style output in CI logs. It does not comment on PRs yet.
 
+Manual workflow runs can optionally set `fail_on` to demonstrate CI gating. The default is `none`, so preview runs do not fail builds based on semantic risk unless a threshold is selected.
+
 ## 🔌 VS Code Extension
 Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
 

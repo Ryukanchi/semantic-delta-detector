@@ -2,12 +2,26 @@ name: Semantic Delta Preview
 
 on:
   workflow_dispatch:
+    inputs:
+      fail_on:
+        description: "Optional risk threshold that fails the workflow"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - low
+          - medium
+          - high
+          - critical
   pull_request:
 
 jobs:
   preview:
     name: Run Semantic Delta preview
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
@@ -34,6 +48,14 @@ jobs:
         run: pnpm run build
 
       # Preview only: this prints the PR-style Semantic Delta output in CI logs.
-      # It does not call the GitHub API, comment on PRs, or fail builds based on semantic risk yet.
+      # It does not call the GitHub API or comment on PRs.
+      # Pull requests remain non-blocking; manual runs can opt into --fail-on.
       - name: Preview PR-style semantic delta comment
-        run: pnpm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
+        env:
+          FAIL_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on || 'none' }}
+        run: |
+          if [ -z "$FAIL_ON" ] || [ "$FAIL_ON" = "none" ]; then
+            pnpm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
+          else
+            pnpm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on "$FAIL_ON"
+          fi
