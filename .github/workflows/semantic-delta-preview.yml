@@ -3,6 +3,14 @@ name: Semantic Delta Preview
 on:
   workflow_dispatch:
     inputs:
+      before_path:
+        description: "Path to the before SQL file"
+        required: false
+        default: "./examples/pr-before.sql"
+      after_path:
+        description: "Path to the after SQL file"
+        required: false
+        default: "./examples/pr-after.sql"
       fail_on:
         description: "Optional risk threshold that fails the workflow"
         required: false
@@ -52,10 +60,15 @@ jobs:
       # Pull requests remain non-blocking; manual runs can opt into --fail-on.
       - name: Preview PR-style semantic delta comment
         env:
+          BEFORE_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.before_path || './examples/pr-before.sql' }}
+          AFTER_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.after_path || './examples/pr-after.sql' }}
           FAIL_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on || 'none' }}
         run: |
+          echo "Comparing before SQL: $BEFORE_PATH"
+          echo "Comparing after SQL: $AFTER_PATH"
+
           if [ -z "$FAIL_ON" ] || [ "$FAIL_ON" = "none" ]; then
-            pnpm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
+            pnpm run compare -- --before "$BEFORE_PATH" --after "$AFTER_PATH" --pr
           else
-            pnpm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on "$FAIL_ON"
+            pnpm run compare -- --before "$BEFORE_PATH" --after "$AFTER_PATH" --pr --fail-on "$FAIL_ON"
           fi
