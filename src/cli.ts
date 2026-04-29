@@ -9,6 +9,7 @@ import {
   SeverityThreshold,
   shouldFailForRisk,
 } from "./ciGating.js";
+import { loadSemanticDeltaConfig } from "./config.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
 import { formatPrComment } from "./output/formatPrComment.js";
 import { formatDemoReport, formatReadableReport } from "./output/formatReport.js";
@@ -240,6 +241,8 @@ function resolveInputs(options: CliOptions): { inputA: MetricDefinitionInput; in
 function main(): void {
   try {
     const options = parseArgs(process.argv.slice(2));
+    const config = loadSemanticDeltaConfig();
+    const failOn = options.failOn ?? config.failOn;
     const { inputA, inputB } = resolveInputs(options);
     const result = compareMetricDefinitions(inputA, inputB);
 
@@ -257,7 +260,7 @@ function main(): void {
       console.log(JSON.stringify(result, null, 2));
     }
 
-    if (options.failOn && shouldFailForRisk(getResultSeverity(result), options.failOn)) {
+    if (failOn && shouldFailForRisk(getResultSeverity(result), failOn)) {
       process.exitCode = 1;
     }
   } catch (error) {

@@ -102,6 +102,14 @@ npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after
 
 Without `--fail-on`, the command prints the preview report without failing based on semantic risk.
 
+Teams can also set a repo-level default in `semantic-delta.yml`:
+
+```yaml
+fail_on: high
+```
+
+The CLI `--fail-on` flag overrides `semantic-delta.yml` when both are present.
+
 ## Low-Risk Example
 Semantic Delta should not warn on formatting-only changes. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.
 
