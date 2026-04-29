@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { compareMetricDefinitions, compareSqlQueries } from "../src/analyzer/differenceEngine.js";
+import { parseFailOnThreshold, shouldFailForRisk } from "../src/ciGating.js";
 import { fixtures } from "./fixtures.js";
 import { formatPrComment } from "../src/output/formatPrComment.js";
 import { formatReadableReport } from "../src/output/formatReport.js";
@@ -716,6 +717,94 @@ test("CLI PR simulation reads before and after SQL files", () => {
   assert.match(output, /🔴 HIGH RISK/);
   assert.match(output, /Aggregation changed from COUNT\(DISTINCT user_id\) to COUNT\(\*\)\./);
   assert.match(output, /Confirm whether the metric is intended to count users or events\./);
+});
+
+test("CI severity gating compares risks against thresholds", () => {
+  assert.equal(shouldFailForRisk("high", "high"), true);
+  assert.equal(shouldFailForRisk("medium", "high"), false);
+  assert.equal(shouldFailForRisk("high", "critical"), false);
+  assert.equal(shouldFailForRisk("critical", "high"), true);
+  assert.equal(parseFailOnThreshold("HIGH"), "high");
+  assert.throws(
+    () => parseFailOnThreshold("urgent"),
+    /Invalid --fail-on value "urgent". Supported values: low, medium, high, critical\./,
+  );
+});
+
+test("CLI --fail-on exits non-zero only at or above the configured threshold", () => {
+  const highThreshold = spawnSync(
+    "npm",
+    [
+      "run",
+      "compare",
+      "--",
+      "--before",
+      "./examples/pr-before.sql",
+      "--after",
+      "./examples/pr-after.sql",
+      "--pr",
+      "--fail-on",
+      "high",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(highThreshold.status, 1);
+  assert.match(highThreshold.stdout, /🔴 HIGH RISK/);
+
+  const criticalThreshold = spawnSync(
+    "npm",
+    [
+      "run",
+      "compare",
+      "--",
+      "--before",
+      "./examples/pr-before.sql",
+      "--after",
+      "./examples/pr-after.sql",
+      "--pr",
+      "--fail-on",
+      "critical",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(criticalThreshold.status, 0);
+  assert.match(criticalThreshold.stdout, /🔴 HIGH RISK/);
+});
+
+test("CLI --fail-on reports invalid thresholds clearly", () => {
+  const result = spawnSync(
+    "npm",
+    [
+      "run",
+      "compare",
+      "--",
+      "--before",
+      "./examples/pr-before.sql",
+      "--after",
+      "./examples/pr-after.sql",
+      "--pr",
+      "--fail-on",
+      "urgent",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /Invalid --fail-on value "urgent". Supported values: low, medium, high, critical\./,
+  );
 });
 
 test("CLI PR simulation requires both before and after files", () => {

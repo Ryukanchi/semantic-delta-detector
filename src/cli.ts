@@ -3,6 +3,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { compareMetricDefinitions } from "./analyzer/differenceEngine.js";
+import {
+  getResultSeverity,
+  parseFailOnThreshold,
+  SeverityThreshold,
+  shouldFailForRisk,
+} from "./ciGating.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
 import { formatPrComment } from "./output/formatPrComment.js";
 import { formatDemoReport, formatReadableReport } from "./output/formatReport.js";
@@ -18,6 +24,7 @@ interface CliOptions {
   jsonA?: string;
   jsonB?: string;
   example?: string;
+  failOn?: SeverityThreshold;
   format: "json" | "text";
   demo: boolean;
   pr: boolean;
@@ -44,6 +51,7 @@ Options:
   --example     Run a bundled example
   --demo        Show high-impact demo output
   --pr          Show a short GitHub PR-style comment
+  --fail-on     Fail with exit code 1 when result risk is at or above low | medium | high | critical
   --format      json | text (default: text)
   --help        Show this message
 `);
@@ -110,6 +118,13 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--pr":
         options.pr = true;
+        break;
+      case "--fail-on":
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing threshold for --fail-on.");
+        }
+        options.failOn = parseFailOnThreshold(next);
+        index += 1;
         break;
       case "--help":
       case "-h":
@@ -230,24 +245,21 @@ function main(): void {
 
     if (options.format === "json") {
       console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-
-    if (options.pr) {
+    } else if (options.pr) {
       console.log(formatPrComment(result));
-      return;
-    }
-
-    if (options.demo) {
+    } else if (options.demo) {
       console.log(formatDemoReport(result));
-      return;
+    } else {
+      console.log(formatReadableReport(result, inputA.query, inputB.query));
+      console.log("");
+      console.log("JSON Output");
+      console.log("-----------");
+      console.log(JSON.stringify(result, null, 2));
     }
 
-    console.log(formatReadableReport(result, inputA.query, inputB.query));
-    console.log("");
-    console.log("JSON Output");
-    console.log("-----------");
-    console.log(JSON.stringify(result, null, 2));
+    if (options.failOn && shouldFailForRisk(getResultSeverity(result), options.failOn)) {
+      process.exitCode = 1;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown CLI failure.";
     console.error(`Error: ${message}`);

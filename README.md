@@ -76,6 +76,12 @@ Preview the kind of short review comment Semantic Delta could add to a pull requ
 npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
 ```
 
+CI can fail on semantic risk by adding `--fail-on low|medium|high|critical`:
+
+```bash
+npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on high
+```
+
 Files used:
 - `examples/pr-before.sql`
 - `examples/pr-after.sql`
