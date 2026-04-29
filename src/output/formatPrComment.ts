@@ -110,7 +110,9 @@ export function formatPrComment(result: SemanticComparisonResult): string {
   const severity = getSeverity(result);
   const evidence = getEvidence(result);
   const evidenceLines =
-    evidence.length > 0 ? evidence.map((item) => `- ${item}`) : ["- No major evidence found."];
+    evidence.length > 0
+      ? evidence.map((item) => `- ${item}`)
+      : ["- No significant semantic differences detected."];
 
   return [
     `${getSeverityEmoji(severity)} ${severity} RISK`,

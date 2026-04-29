@@ -1337,7 +1337,7 @@ function buildRecommendation(
     return "Keep the metrics separately documented and call out the qualification rules directly in dashboards or metric specs.";
   }
 
-  return "These metrics are reasonably aligned, but keep a written definition so future changes do not create semantic drift.";
+  return "No action required beyond normal review.";
 }
 
 function mapRiskToSeverity(riskLevel: RiskLevel): ImpactLayer["severity"] {
@@ -1393,7 +1393,7 @@ function buildDecisionRisk(differences: DetectedDifference[]): string {
   }
 
   if (risks.length === 0) {
-    return "No major decision risk detected from semantic differences.";
+    return "No significant business impact detected.";
   }
 
   return `Decision risk: ${risks.join("; ")}.`;
@@ -1429,6 +1429,10 @@ export function buildVerdict(
 
   if (result.risk_level === "medium") {
     return "MEDIUM RISK: This change may affect how the metric is interpreted.";
+  }
+
+  if (result.detected_differences.length === 0) {
+    return "LOW RISK: No meaningful semantic change detected.";
   }
 
   return "LOW RISK: This change is unlikely to alter the meaning of the metric.";

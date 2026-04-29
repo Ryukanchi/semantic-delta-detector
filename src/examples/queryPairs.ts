@@ -2,6 +2,17 @@ import { ExampleQueryPair } from "../types.js";
 
 export const exampleQueryPairs: ExampleQueryPair[] = [
   {
+    id: "same-de-users-formatting",
+    title: "Same DE Users With Formatting Changes",
+    description: "Shows that formatting-only SQL changes do not create semantic risk.",
+    queryAName: "de_users",
+    queryBName: "de_users",
+    queryA: "SELECT COUNT(*) FROM users WHERE country = 'DE'",
+    queryB: `SELECT COUNT(*)
+FROM users
+WHERE country = 'DE'`,
+  },
+  {
     id: "login-vs-paid",
     title: "Engaged Users vs Paying Users",
     description: "Shows two distinct-count metrics that look structurally similar but mean different things.",

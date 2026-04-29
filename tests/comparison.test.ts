@@ -20,6 +20,26 @@ test("happy path returns strong similarity for equivalent queries", () => {
   assert.deepEqual(result.evidence_sources, ["sql_only"]);
 });
 
+test("formatting-only query changes produce a calm low-risk result", () => {
+  const result = compareSqlQueries(
+    "SELECT COUNT(*) FROM users WHERE country = 'DE'",
+    `SELECT COUNT(*)
+FROM users
+WHERE country = 'DE'`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.ok(result.semantic_similarity_score >= 90);
+  assert.equal(result.detected_differences.length, 0);
+  assert.equal(result.verdict, "LOW RISK: No meaningful semantic change detected.");
+  assert.ok(result.impact);
+  assert.equal(result.impact.severity, "LOW");
+  assert.equal(result.impact.decisionRisk, "No significant business impact detected.");
+  assert.deepEqual(result.impact.evidence, []);
+  assert.equal(result.recommendation, "No action required beyond normal review.");
+  assert.equal(result.impact.recommendedAction, result.recommendation);
+});
+
 test("semantic mismatch flags engagement vs monetization clearly", () => {
   const result = compareMetricDefinitions(
     fixtures.semanticMismatch.inputA,
@@ -628,6 +648,7 @@ test("PR comment formatter returns a short actionable comment", () => {
   );
   const comment = formatPrComment(result);
 
+  assert.equal(result.risk_level, "high");
   assert.match(comment, /^🔴 HIGH RISK\nThis change alters the meaning of the metric\./);
   assert.match(comment, /Impact: aggregation changes may change what is counted\./);
   assert.doesNotMatch(comment, /Impact: (Decision risk|Decision Risk|Risk):/);
@@ -636,6 +657,22 @@ test("PR comment formatter returns a short actionable comment", () => {
   assert.doesNotMatch(comment, /## Summary|Key Findings|Business Meaning/);
   assert.ok(comment.split("\n").filter((line) => line.startsWith("- ")).length <= 2);
   assert.ok(comment.split("\n").length <= 10);
+});
+
+test("PR comment for formatting-only changes is calm and non-blocking", () => {
+  const result = compareSqlQueries(
+    "SELECT COUNT(*) FROM users WHERE country = 'DE'",
+    `SELECT COUNT(*)
+FROM users
+WHERE country = 'DE'`,
+  );
+  const comment = formatPrComment(result);
+
+  assert.match(comment, /^🟢 LOW RISK\nNo meaningful semantic change detected\./);
+  assert.match(comment, /Impact: No significant business impact detected\./);
+  assert.match(comment, /Evidence:\n- No significant semantic differences detected\./);
+  assert.match(comment, /Recommendation: No action required beyond normal review\./);
+  assert.doesNotMatch(comment, /Do not|Confirm whether|Decision risk|alters the meaning/i);
 });
 
 test("PR comment keeps evidence aligned with the recommendation", () => {
@@ -682,6 +719,23 @@ test("CLI PR examples include validated semantic cases", () => {
   assert.match(output, /Recommendation: Do not compare unique-user login counts/i);
 });
 
+test("CLI PR examples include a calm formatting-only low-risk case", () => {
+  const output = execFileSync(
+    "npm",
+    ["run", "compare", "--", "--example", "same-de-users-formatting", "--pr"],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: "pipe",
+    },
+  );
+
+  assert.match(output, /🟢 LOW RISK/);
+  assert.match(output, /No meaningful semantic change detected\./);
+  assert.match(output, /Impact: No significant business impact detected\./);
+  assert.match(output, /Recommendation: No action required beyond normal review\./);
+});
+
 test("unknown CLI example lists newly added examples", () => {
   assert.throws(
     () =>
@@ -690,7 +744,7 @@ test("unknown CLI example lists newly added examples", () => {
         encoding: "utf8",
         stdio: "pipe",
       }),
-    /Available examples: .*unique-login-users-vs-login-event-rows.*paid-users-vs-all-users.*daily-login-counts-vs-monthly-login-counts.*left-join-vs-inner-join/,
+    /Available examples: .*same-de-users-formatting.*unique-login-users-vs-login-event-rows.*paid-users-vs-all-users.*daily-login-counts-vs-monthly-login-counts.*left-join-vs-inner-join/,
   );
 });
 
