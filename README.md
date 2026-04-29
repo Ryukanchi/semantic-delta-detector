@@ -4,14 +4,23 @@
 
 ![Decision Report](docs/assets/decision-report.png)
 
-Same SQL. Different meaning. High-risk metric drift caught early.
+Similar SQL. Different meaning. High-risk metric drift caught early.
+The report summarizes verdict, business impact, evidence, and the recommended reviewer action.
 
 ## 🚨 What this solves
 A dashboard can show “active users” in two places and hide two different definitions.
 One team may count product logins.
 Another may count paying users who were recently active.
 
-semantic-delta-detector catches that drift before teams compare incompatible KPIs, trust the wrong chart, or make decisions from the wrong number.
+semantic-delta-detector helps catch that drift before teams compare incompatible KPIs, trust the wrong chart, or make decisions from the wrong number.
+
+## Try it locally
+From a cloned repo:
+
+```bash
+npm install
+npm run compare -- --example unique-login-users-vs-login-event-rows --pr
+```
 
 ## 🔍 Example (the hook)
 Two SQL queries can look similar, share a metric name, and still answer different business questions.
@@ -40,7 +49,7 @@ This is a more detailed breakdown of the semantic comparison output.
 - Reads two SQL-backed metric definitions
 - Extracts tables, filters, time windows, and aggregations
 - Infers the likely business meaning of each query
-- Compares whether the definitions are safe to treat as the same metric
+- Compares whether there is semantic risk in treating them as the same metric
 - Returns a compact risk report with explanation and recommendation
 
 ## Semantic Risk Examples
@@ -61,25 +70,12 @@ Same-looking SQL changes can mean different KPIs. These examples show the kinds 
 | Daily login counts -> monthly login counts | Daily login event counts | Monthly login event counts | Medium | Same activity and aggregation, but different reporting grain; daily and monthly trend points are not directly comparable. |
 | LEFT JOIN users/orders -> INNER JOIN users/orders | All users with optional order matches | Users with matching order records | High | Changing LEFT JOIN to INNER JOIN can exclude users without orders and change population inclusion. |
 
-## 🚀 Quick demo
-```bash
-npx semantic-delta-detector \
-  --json-a ./src/examples/product-active-users.json \
-  --json-b ./src/examples/finance-active-users.json \
-  --demo
-```
-
 ## Pull Request Simulation
+### Local PR Simulation
 Preview the kind of short review comment Semantic Delta could add to a pull request. This local mode does not call the GitHub API yet; it reads before/after SQL files and prints a PR-style risk comment.
 
 ```bash
 npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
-```
-
-CI can fail on semantic risk by adding `--fail-on low|medium|high|critical`:
-
-```bash
-npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on high
 ```
 
 Files used:
@@ -97,8 +93,17 @@ Evidence:
 Recommendation: Do not compare unique-user login counts with login event-row counts as the same KPI. Confirm whether the metric is intended to count users or events.
 ```
 
+### Optional CI Gating
+CI can opt into failing on semantic risk by adding `--fail-on low|medium|high|critical`:
+
+```bash
+npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on high
+```
+
+Without `--fail-on`, the command prints the preview report without failing based on semantic risk.
+
 ## Low-Risk Example
-Semantic Delta is not meant to flag every SQL text change. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.
+Semantic Delta should not warn on formatting-only changes. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.
 
 ```bash
 npm run compare -- --example same-de-users-formatting --pr
@@ -116,11 +121,10 @@ Recommendation: No action required beyond normal review.
 
 This helps keep the tool useful as a reviewer instead of an alarm machine.
 
-This is the bridge toward a future GitHub Action or PR bot.
+### GitHub Actions Preview
+A preview GitHub Actions workflow is included at `.github/workflows/semantic-delta-preview.yml`. It runs the local PR simulation and prints the PR-style output in CI logs. It does not comment on PRs or call the GitHub API.
 
-A preview GitHub Actions workflow is included at `.github/workflows/semantic-delta-preview.yml`. It runs the local PR simulation and prints the PR-style output in CI logs. It does not comment on PRs yet.
-
-Manual workflow runs can optionally set `fail_on` to demonstrate CI gating. The default is `none`, so preview runs do not fail builds based on semantic risk unless a threshold is selected.
+Pull request runs are non-blocking by default. Manual workflow runs can optionally set `fail_on` to demonstrate gating; the default is `none`, so preview runs do not fail builds based on semantic risk unless a threshold is selected.
 
 ## 🔌 VS Code Extension
 Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
