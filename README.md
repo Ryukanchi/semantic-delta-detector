@@ -97,6 +97,25 @@ Evidence:
 Recommendation: Do not compare unique-user login counts with login event-row counts as the same KPI. Confirm whether the metric is intended to count users or events.
 ```
 
+## Low-Risk Example
+Semantic Delta is not meant to flag every SQL text change. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.
+
+```bash
+npm run compare -- --example same-de-users-formatting --pr
+```
+
+```text
+🟢 LOW RISK
+No meaningful semantic change detected.
+
+Impact: No significant business impact detected.
+Evidence:
+- No significant semantic differences detected.
+Recommendation: No action required beyond normal review.
+```
+
+This helps keep the tool useful as a reviewer instead of an alarm machine.
+
 This is the bridge toward a future GitHub Action or PR bot.
 
 A preview GitHub Actions workflow is included at `.github/workflows/semantic-delta-preview.yml`. It runs the local PR simulation and prints the PR-style output in CI logs. It does not comment on PRs yet.
