@@ -9,7 +9,7 @@ import {
   SeverityThreshold,
   shouldFailForRisk,
 } from "./ciGating.js";
-import { loadSemanticDeltaConfig } from "./config.js";
+import { loadSemanticDeltaConfig, SemanticDeltaConfig } from "./config.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
 import { formatPrComment } from "./output/formatPrComment.js";
 import { formatDemoReport, formatReadableReport } from "./output/formatReport.js";
@@ -178,22 +178,10 @@ function readMetricDefinitionFromJson(filePath: string): MetricDefinitionInput {
   return parsed;
 }
 
-function resolveInputs(options: CliOptions): { inputA: MetricDefinitionInput; inputB: MetricDefinitionInput } {
-  if (options.beforeFile || options.afterFile) {
-    if (!options.beforeFile || !options.afterFile) {
-      throw new Error("Provide both --before and --after for PR simulation.");
-    }
-
-    return {
-      inputA: {
-        query: readSqlFromFile(options.beforeFile, "Before"),
-      },
-      inputB: {
-        query: readSqlFromFile(options.afterFile, "After"),
-      },
-    };
-  }
-
+function resolveInputs(
+  options: CliOptions,
+  config: SemanticDeltaConfig,
+): { inputA: MetricDefinitionInput; inputB: MetricDefinitionInput } {
   if (options.example) {
     const example = exampleQueryPairs.find((item) => item.id === options.example);
     if (!example) {
@@ -212,6 +200,24 @@ function resolveInputs(options: CliOptions): { inputA: MetricDefinitionInput; in
       inputB: {
         metric_name: example.queryBName,
         query: example.queryB,
+      },
+    };
+  }
+
+  const beforeFile = options.beforeFile ?? config.defaultBeforePath;
+  const afterFile = options.afterFile ?? config.defaultAfterPath;
+
+  if (beforeFile || afterFile) {
+    if (!beforeFile || !afterFile) {
+      throw new Error("Provide both --before and --after for PR simulation.");
+    }
+
+    return {
+      inputA: {
+        query: readSqlFromFile(beforeFile, "Before"),
+      },
+      inputB: {
+        query: readSqlFromFile(afterFile, "After"),
       },
     };
   }
@@ -243,7 +249,7 @@ function main(): void {
     const options = parseArgs(process.argv.slice(2));
     const config = loadSemanticDeltaConfig();
     const failOn = options.failOn ?? config.failOn;
-    const { inputA, inputB } = resolveInputs(options);
+    const { inputA, inputB } = resolveInputs(options, config);
     const result = compareMetricDefinitions(inputA, inputB);
 
     if (options.format === "json") {
