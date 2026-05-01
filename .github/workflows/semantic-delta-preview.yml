@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       before_path:
-        description: "Path to the before SQL file"
+        description: "Optional path to the before SQL file. Leave empty to use semantic-delta.yml defaults."
         required: false
-        default: "./examples/pr-before.sql"
+        default: ""
       after_path:
-        description: "Path to the after SQL file"
+        description: "Optional path to the after SQL file. Leave empty to use semantic-delta.yml defaults."
         required: false
-        default: "./examples/pr-after.sql"
+        default: ""
       fail_on:
-        description: "Optional risk threshold that fails the workflow"
+        description: "Optional risk threshold that fails the workflow. none omits --fail-on, so semantic-delta.yml fail_on may still apply."
         required: false
         default: "none"
         type: choice
@@ -57,18 +57,47 @@ jobs:
 
       # Preview only: this prints the PR-style Semantic Delta output in CI logs.
       # It does not call the GitHub API or comment on PRs.
-      # Pull requests remain non-blocking; manual runs can opt into --fail-on.
+      # Pull requests remain non-blocking and use demo files.
+      # Manual runs can provide paths or leave them empty to use semantic-delta.yml defaults.
       - name: Preview PR-style semantic delta comment
         env:
-          BEFORE_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.before_path || './examples/pr-before.sql' }}
-          AFTER_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.after_path || './examples/pr-after.sql' }}
-          FAIL_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.fail_on || 'none' }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_PATH_INPUT: ${{ inputs.before_path }}
+          AFTER_PATH_INPUT: ${{ inputs.after_path }}
+          FAIL_ON: ${{ inputs.fail_on || 'none' }}
         run: |
-          echo "Comparing before SQL: $BEFORE_PATH"
-          echo "Comparing after SQL: $AFTER_PATH"
+          set -u
+
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "Pull request preview: using demo before/after files."
+            echo "before_path source: pull_request demo default"
+            echo "after_path source: pull_request demo default"
+            echo "fail_on behavior: none for pull_request; preview output is non-blocking."
+            pnpm run compare -- --before "./examples/pr-before.sql" --after "./examples/pr-after.sql" --pr || true
+            exit 0
+          fi
+
+          args=(--pr)
+
+          if [ -n "$BEFORE_PATH_INPUT" ]; then
+            echo "before_path source: workflow input ($BEFORE_PATH_INPUT)"
+            args+=(--before "$BEFORE_PATH_INPUT")
+          else
+            echo "before_path source: CLI/config fallback (no workflow input provided)"
+          fi
+
+          if [ -n "$AFTER_PATH_INPUT" ]; then
+            echo "after_path source: workflow input ($AFTER_PATH_INPUT)"
+            args+=(--after "$AFTER_PATH_INPUT")
+          else
+            echo "after_path source: CLI/config fallback (no workflow input provided)"
+          fi
 
           if [ -z "$FAIL_ON" ] || [ "$FAIL_ON" = "none" ]; then
-            pnpm run compare -- --before "$BEFORE_PATH" --after "$AFTER_PATH" --pr
+            echo "fail_on behavior: no --fail-on workflow override; semantic-delta.yml fail_on may apply if configured."
           else
-            pnpm run compare -- --before "$BEFORE_PATH" --after "$AFTER_PATH" --pr --fail-on "$FAIL_ON"
+            echo "fail_on behavior: workflow input overrides config ($FAIL_ON)"
+            args+=(--fail-on "$FAIL_ON")
           fi
+
+          pnpm run compare -- "${args[@]}"
