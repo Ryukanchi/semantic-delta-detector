@@ -59,6 +59,41 @@ test("semantic-delta.yml default before and after paths are loaded", () => {
   });
 });
 
+test("semantic-delta.yml include and ignore patterns are loaded", () => {
+  withTempDir((dir) => {
+    writeFileSync(
+      join(dir, "semantic-delta.yml"),
+      [
+        "include:",
+        "  - metrics/**",
+        "  - 'models/**'",
+        "ignore:",
+        "  - docs/**",
+        "  - README.md",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = loadSemanticDeltaConfig(dir);
+
+    assert.deepEqual(config.include, ["metrics/**", "models/**"]);
+    assert.deepEqual(config.ignore, ["docs/**", "README.md"]);
+  });
+});
+
+test("semantic-delta.yml defaults missing include and ignore to empty arrays", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "semantic-delta.yml"), "fail_on: high\n", "utf8");
+
+    const config = loadSemanticDeltaConfig(dir);
+
+    assert.equal(config.failOn, "high");
+    assert.deepEqual(config.include, []);
+    assert.deepEqual(config.ignore, []);
+  });
+});
+
 test("semantic-delta.yml fail_on high enables CI gating", () => {
   withTempDir((dir) => {
     writeFileSync(join(dir, "semantic-delta.yml"), "fail_on: high\n", "utf8");

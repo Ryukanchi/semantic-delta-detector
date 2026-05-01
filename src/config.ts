@@ -6,6 +6,8 @@ export interface SemanticDeltaConfig {
   failOn?: SeverityThreshold;
   defaultBeforePath?: string;
   defaultAfterPath?: string;
+  include: string[];
+  ignore: string[];
 }
 
 const configFileName = "semantic-delta.yml";
@@ -21,20 +23,50 @@ export function loadSemanticDeltaConfig(cwd = process.cwd()): SemanticDeltaConfi
   const configPath = resolve(cwd, configFileName);
 
   if (!existsSync(configPath)) {
-    return {};
+    return { include: [], ignore: [] };
   }
 
   const contents = readFileSync(configPath, "utf8");
-  const config: SemanticDeltaConfig = {};
+  const config: SemanticDeltaConfig = { include: [], ignore: [] };
+  let activeList: "include" | "ignore" | null = null;
 
-  for (const line of contents.split(/\r?\n/).map((value) => value.trim())) {
-    const match = line.match(/^(fail_on|default_before_path|default_after_path)\s*:(.*)$/i);
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const listItemMatch = line.match(/^-\s+(.+)$/);
+    if (activeList && listItemMatch) {
+      const value = cleanScalarValue(listItemMatch[1]);
+      if (value) {
+        config[activeList].push(value);
+      }
+      continue;
+    }
+
+    const match = line.match(
+      /^(fail_on|default_before_path|default_after_path|include|ignore)\s*:(.*)$/i,
+    );
     if (!match) {
+      activeList = null;
       continue;
     }
 
     const key = match[1].toLowerCase();
     const value = cleanScalarValue(match[2]);
+
+    if (key === "include" || key === "ignore") {
+      activeList = key;
+      if (value) {
+        config[key].push(value);
+      }
+      continue;
+    }
+
+    activeList = null;
+
     if (!value) {
       continue;
     }
