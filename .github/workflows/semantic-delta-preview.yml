@@ -6,11 +6,11 @@ on:
       before_path:
         description: "Optional path to the before SQL file. Leave empty to use semantic-delta.yml defaults."
         required: false
-        default: ""
+        default: "./examples/pr-before.sql"
       after_path:
         description: "Optional path to the after SQL file. Leave empty to use semantic-delta.yml defaults."
         required: false
-        default: ""
+        default: "./examples/pr-after.sql"
       fail_on:
         description: "Optional risk threshold that fails the workflow. none omits --fail-on, so semantic-delta.yml fail_on may still apply."
         required: false

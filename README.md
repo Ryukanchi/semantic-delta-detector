@@ -139,7 +139,7 @@ Pull request runs are non-blocking by default and use the demo files:
 - `./examples/pr-before.sql`
 - `./examples/pr-after.sql`
 
-Manual workflow runs can provide `before_path` and `after_path`, or leave them empty to let the CLI use `semantic-delta.yml` defaults:
+Manual workflow runs default to the same demo SQL files, so **Run workflow** succeeds out of the box. To use repo-level `semantic-delta.yml` path defaults, manually clear `before_path` and `after_path` in the workflow form:
 
 ```yaml
 default_before_path: ./examples/pr-before.sql
@@ -147,6 +147,7 @@ default_after_path: ./examples/pr-after.sql
 ```
 
 Manual runs can also set `fail_on` to demonstrate gating. If manual `fail_on` is `none`, the workflow does not pass `--fail-on`; a configured `semantic-delta.yml` `fail_on` may still apply. Pull request preview runs remain non-blocking and do not let repo config gating fail PR checks yet.
+If no workflow paths are provided and no config path defaults exist, the CLI fails with its normal missing-input error.
 
 ## 🔌 VS Code Extension
 Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
