@@ -8,6 +8,16 @@ interface PathFilterOptions {
   ignore?: string[];
 }
 
+export interface FilteredPath {
+  path: string;
+  reason: string;
+}
+
+export interface CandidatePathFilterResult {
+  included: FilteredPath[];
+  skipped: FilteredPath[];
+}
+
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\/+/, "");
 }
@@ -71,4 +81,30 @@ export function shouldIncludePath(
     included: false,
     reason: "excluded because no include pattern matched",
   };
+}
+
+export function filterCandidatePaths(
+  paths: string[],
+  options: PathFilterOptions,
+): CandidatePathFilterResult {
+  const result: CandidatePathFilterResult = {
+    included: [],
+    skipped: [],
+  };
+
+  for (const path of paths) {
+    const decision = shouldIncludePath(path, options);
+    const filteredPath = {
+      path,
+      reason: decision.reason,
+    };
+
+    if (decision.included) {
+      result.included.push(filteredPath);
+    } else {
+      result.skipped.push(filteredPath);
+    }
+  }
+
+  return result;
 }

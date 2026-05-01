@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shouldIncludePath } from "../src/pathFilter.js";
+import { filterCandidatePaths, shouldIncludePath } from "../src/pathFilter.js";
 
 test("path filter includes by default when include and ignore are empty", () => {
   assert.deepEqual(shouldIncludePath("metrics/revenue.sql", {}), {
@@ -61,5 +61,97 @@ test("path filter normalizes Windows-style backslashes", () => {
   assert.deepEqual(shouldIncludePath("metrics\\revenue.sql", { include: ["metrics/**"] }), {
     included: true,
     reason: "included by include pattern: metrics/**",
+  });
+});
+
+test("candidate path filter splits mixed paths into included and skipped", () => {
+  assert.deepEqual(
+    filterCandidatePaths(["metrics/revenue.sql", "docs/revenue.sql", "metrics/archive/old.sql"], {
+      include: ["metrics/**"],
+      ignore: ["metrics/archive/**"],
+    }),
+    {
+      included: [
+        {
+          path: "metrics/revenue.sql",
+          reason: "included by include pattern: metrics/**",
+        },
+      ],
+      skipped: [
+        {
+          path: "docs/revenue.sql",
+          reason: "excluded because no include pattern matched",
+        },
+        {
+          path: "metrics/archive/old.sql",
+          reason: "excluded by ignore pattern: metrics/archive/**",
+        },
+      ],
+    },
+  );
+});
+
+test("candidate path filter preserves input order within included and skipped groups", () => {
+  const result = filterCandidatePaths(
+    ["models/a.sql", "docs/a.sql", "metrics/b.sql", "README.md", "models/c.sql"],
+    {
+      include: ["models/**", "metrics/**"],
+      ignore: ["README.md"],
+    },
+  );
+
+  assert.deepEqual(
+    result.included.map((item) => item.path),
+    ["models/a.sql", "metrics/b.sql", "models/c.sql"],
+  );
+  assert.deepEqual(
+    result.skipped.map((item) => item.path),
+    ["docs/a.sql", "README.md"],
+  );
+});
+
+test("candidate path filter reports skip reasons from ignore patterns", () => {
+  const result = filterCandidatePaths(["docs/readme.md"], { ignore: ["docs/**"] });
+
+  assert.deepEqual(result.skipped, [
+    {
+      path: "docs/readme.md",
+      reason: "excluded by ignore pattern: docs/**",
+    },
+  ]);
+});
+
+test("candidate path filter reports skip reasons when no include pattern matches", () => {
+  const result = filterCandidatePaths(["docs/revenue.sql"], { include: ["metrics/**"] });
+
+  assert.deepEqual(result.skipped, [
+    {
+      path: "docs/revenue.sql",
+      reason: "excluded because no include pattern matched",
+    },
+  ]);
+});
+
+test("candidate path filter handles empty path lists", () => {
+  assert.deepEqual(filterCandidatePaths([], { include: ["metrics/**"], ignore: ["docs/**"] }), {
+    included: [],
+    skipped: [],
+  });
+});
+
+test("candidate path filter works with include missing and ignore present", () => {
+  assert.deepEqual(filterCandidatePaths(["metrics/revenue.sql", "docs/readme.md"], { ignore: ["docs/**"] }), {
+    included: [
+      {
+        path: "metrics/revenue.sql",
+        reason: "included by default",
+      },
+    ],
+    skipped: [
+      {
+        path: "docs/readme.md",
+        reason: "excluded by ignore pattern: docs/**",
+      },
+    ],
   });
 });
