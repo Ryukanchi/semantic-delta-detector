@@ -298,6 +298,15 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
     score -= profileA.sourceDomain === profileB.sourceDomain ? 10 : 20;
   }
 
+  const conditionSetA = [...queryA.conditions].sort().join(" | ");
+  const conditionSetB = [...queryB.conditions].sort().join(" | ");
+  if (
+    conditionSetA === conditionSetB &&
+    queryA.whereOperators.join("|") !== queryB.whereOperators.join("|")
+  ) {
+    score -= 30;
+  }
+
   const sharedFilters = queryA.filters.filter((filter) => queryB.filters.includes(filter)).length;
   const maxFilters = Math.max(queryA.filters.length, queryB.filters.length);
   if (maxFilters > 0) {

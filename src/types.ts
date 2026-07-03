@@ -15,6 +15,7 @@ export type DifferenceCategory =
   | "time_reference_mismatch"
   | "reporting_grain_mismatch"
   | "join_type_mismatch"
+  | "filter_logic_mismatch"
   | "aggregation_mismatch"
   | "metric_intent_mismatch"
   | "team_context_mismatch"
@@ -39,12 +40,15 @@ export interface ParsedSqlQuery {
   aggregationDistinctTarget: string | null;
   metricName: string;
   whereClause: string | null;
+  whereOperators: WhereBooleanOperator[];
   groupByExpressions: string[];
   joinClauses: SqlJoinClause[];
   filters: string[];
   timeWindows: string[];
   conditions: string[];
 }
+
+export type WhereBooleanOperator = "and" | "or";
 
 export interface SqlJoinClause {
   type: "inner" | "left" | "right" | "full" | "cross";
@@ -95,6 +99,7 @@ export interface SemanticComparisonResult {
   evidence_sources: EvidenceSource[];
   explanation: string;
   recommendation: string;
+  parser_limitations?: string[];
   verdict?: string;
   impact?: ImpactLayer;
 }

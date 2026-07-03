@@ -1,4 +1,5 @@
 import { tokenizeSql } from "../parser/sqlTokenizer.js";
+import { buildParserLimitationNotes } from "../parser/unsupportedConstructs.js";
 import {
   buildSemanticProfile,
   estimateBaseSimilarity,
@@ -689,6 +690,58 @@ function describeAggregationMeasure(query: ParsedSqlQuery): string | null {
   return null;
 }
 
+function hasSameConditionSet(queryA: ParsedSqlQuery, queryB: ParsedSqlQuery): boolean {
+  const conditionsA = [...queryA.conditions].sort().join(" | ");
+  const conditionsB = [...queryB.conditions].sort().join(" | ");
+  return conditionsA === conditionsB;
+}
+
+function usesOnly(
+  operators: ParsedSqlQuery["whereOperators"],
+  operator: "and" | "or",
+): boolean {
+  return operators.length > 0 && operators.every((item) => item === operator);
+}
+
+function compareFilterBooleanLogic(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference | null {
+  // Only judge boolean structure when the individual conditions are identical;
+  // added or removed conditions are covered by the filter-scope detectors.
+  if (!queryA.whereClause || !queryB.whereClause || !hasSameConditionSet(queryA, queryB)) {
+    return null;
+  }
+
+  if (queryA.whereOperators.join("|") === queryB.whereOperators.join("|")) {
+    return null;
+  }
+
+  const conditions = formatFilterList(queryA.conditions);
+
+  if (usesOnly(queryA.whereOperators, "and") && usesOnly(queryB.whereOperators, "or")) {
+    return {
+      category: "filter_logic_mismatch",
+      description: `The WHERE filter logic changed from AND to OR. The conditions are unchanged (${conditions}), but Query A requires all conditions to hold, while Query B qualifies records matching any single condition. The measured population becomes broader.`,
+      impact: "high",
+    };
+  }
+
+  if (usesOnly(queryA.whereOperators, "or") && usesOnly(queryB.whereOperators, "and")) {
+    return {
+      category: "filter_logic_mismatch",
+      description: `The WHERE filter logic changed from OR to AND. The conditions are unchanged (${conditions}), but Query A qualifies records matching any single condition, while Query B requires all conditions to hold. The measured population becomes narrower.`,
+      impact: "high",
+    };
+  }
+
+  return {
+    category: "filter_logic_mismatch",
+    description: `The WHERE boolean operator structure changed while the conditions stayed the same (${conditions}). Combining the same conditions with a different AND/OR structure can broaden or narrow the measured population.`,
+    impact: "medium",
+  };
+}
+
 function compareBusinessLogic(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
@@ -888,6 +941,7 @@ function deriveEvidenceSources(
         "monetization_mismatch",
         "time_reference_mismatch",
         "join_type_mismatch",
+        "filter_logic_mismatch",
         "metric_intent_mismatch",
       ].includes(difference.category),
     );
@@ -1134,6 +1188,14 @@ function buildExplanation(
     return `${broadEntityText}, but the filter scope changes the measured population. ${filterScopeDifference.description} ${evidenceNote}${metadataContextNote}`;
   }
 
+  const filterLogicDifference = differences.find(
+    (difference) => difference.category === "filter_logic_mismatch",
+  );
+
+  if (filterLogicDifference) {
+    return `${broadEntityText}, but the boolean filter logic changes the measured population. ${filterLogicDifference.description} ${evidenceNote}${metadataContextNote}`;
+  }
+
   if (joinPopulationDifference) {
     return `${broadEntityText}, but the JOIN changes the measured population. ${joinPopulationDifference.description} This means the metric may count joined rows or users with matching joined records rather than all base-table users. ${evidenceNote}${metadataContextNote}`;
   }
@@ -1218,6 +1280,22 @@ function buildRecommendation(
 
   if (removedFilterDifference) {
     return "Confirm whether removing the filter is intentional. Downstream dashboards expecting the narrower filtered activity may now include the broader population.";
+  }
+
+  const filterLogicDifference = differences.find(
+    (difference) => difference.category === "filter_logic_mismatch",
+  );
+
+  if (filterLogicDifference) {
+    if (/changed from AND to OR/i.test(filterLogicDifference.description)) {
+      return "Confirm whether changing AND to OR is intentional. The measured population may have broadened: records matching any single condition now qualify for the metric.";
+    }
+
+    if (/changed from OR to AND/i.test(filterLogicDifference.description)) {
+      return "Confirm whether changing OR to AND is intentional. The measured population may have narrowed: records must now match all conditions to qualify for the metric.";
+    }
+
+    return "Confirm whether the WHERE boolean logic change is intentional. The measured population may have broadened or narrowed even though the individual conditions are unchanged.";
   }
 
   const joinPopulationDifference = differences.find(
@@ -1384,6 +1462,10 @@ function buildDecisionRisk(differences: DetectedDifference[]): string {
     risks.push("filter removal may alter the metric population");
   }
 
+  if (differences.some((difference) => difference.category === "filter_logic_mismatch")) {
+    risks.push("boolean filter logic changes may broaden or narrow the metric population");
+  }
+
   if (hasJoinChange(differences)) {
     risks.push("join changes may include or exclude users and change row counts");
   }
@@ -1464,6 +1546,7 @@ export function compareMetricDefinitions(
   pushDifference(detectedDifferences, compareReportingGrain(parsedA, parsedB));
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
   pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
+  pushDifference(detectedDifferences, compareFilterBooleanLogic(parsedA, parsedB));
   pushDifference(detectedDifferences, compareBusinessLogic(parsedA, parsedB, profileA, profileB));
   pushDifference(detectedDifferences, compareDescriptions(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareTeamContext(normalizedInputA, normalizedInputB));
@@ -1483,6 +1566,10 @@ export function compareMetricDefinitions(
     detectedDifferences,
   );
   const confidenceLevel = inferConfidenceLevel(evidenceSources, detectedDifferences);
+  const parserLimitations = buildParserLimitationNotes(
+    normalizedInputA.query,
+    normalizedInputB.query,
+  );
 
   const result: SemanticComparisonResult = {
     metric_name_a: getDisplayMetricName(normalizedInputA, parsedA),
@@ -1510,6 +1597,7 @@ export function compareMetricDefinitions(
       profileB,
       detectedDifferences,
     ),
+    ...(parserLimitations.length > 0 ? { parser_limitations: parserLimitations } : {}),
   };
   const impact = buildImpactLayer(result);
 

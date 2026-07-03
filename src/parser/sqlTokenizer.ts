@@ -1,4 +1,4 @@
-import { ParsedSqlQuery, SqlJoinClause } from "../types.js";
+import { ParsedSqlQuery, SqlJoinClause, WhereBooleanOperator } from "../types.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
 
@@ -126,6 +126,15 @@ function extractWhereClause(query: string): string | null {
   return match ? normalizeWhitespace(match[1]) : null;
 }
 
+function extractWhereOperators(whereClause: string | null): WhereBooleanOperator[] {
+  if (!whereClause) {
+    return [];
+  }
+
+  const matches = whereClause.match(/\bAND\b|\bOR\b/gi) ?? [];
+  return matches.map((operator) => operator.toLowerCase() as WhereBooleanOperator);
+}
+
 function extractGroupByExpressions(query: string): string[] {
   const match = query.match(
     /\bgroup\s+by\b\s+(.+?)(?=\border\s+by\b|\bhaving\b|\blimit\b|$)/is,
@@ -206,6 +215,7 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
   const selectedExpressions = extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
   const whereClause = extractWhereClause(normalizedQuery);
+  const whereOperators = extractWhereOperators(whereClause);
   const groupByExpressions = extractGroupByExpressions(normalizedQuery);
   const conditions = splitConditions(whereClause);
   const timeWindows = extractTimeWindows(conditions);
@@ -221,6 +231,7 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
     aggregationDistinctTarget,
     metricName,
     whereClause,
+    whereOperators,
     groupByExpressions,
     joinClauses,
     filters,

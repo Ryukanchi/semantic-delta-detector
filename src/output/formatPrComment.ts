@@ -114,6 +114,8 @@ export function formatPrComment(result: SemanticComparisonResult): string {
       ? evidence.map((item) => `- ${item}`)
       : ["- No significant semantic differences detected."];
 
+  const limitationLines = (result.parser_limitations ?? []).map((note) => `Note: ${note}`);
+
   return [
     `${getSeverityEmoji(severity)} ${severity} RISK`,
     getVerdictBody(result),
@@ -124,5 +126,6 @@ export function formatPrComment(result: SemanticComparisonResult): string {
     "Evidence:",
     ...evidenceLines,
     `Recommendation: ${result.impact?.recommendedAction || result.recommendation}`,
+    ...limitationLines,
   ].join("\n");
 }

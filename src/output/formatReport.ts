@@ -9,6 +9,7 @@ function getCategoryLabel(category: string): string {
     time_reference_mismatch: "Time Reference",
     reporting_grain_mismatch: "Reporting Grain",
     join_type_mismatch: "Join Type",
+    filter_logic_mismatch: "Filter Logic",
     aggregation_mismatch: "Aggregation",
     metric_intent_mismatch: "Metric Intent",
     team_context_mismatch: "Team Context",
@@ -48,6 +49,18 @@ function formatEvidence(result: SemanticComparisonResult): string[] {
   );
 }
 
+function formatParserLimitations(result: SemanticComparisonResult): string[] {
+  if (!result.parser_limitations || result.parser_limitations.length === 0) {
+    return [];
+  }
+
+  return [
+    "",
+    "## Analysis Limits",
+    ...result.parser_limitations.map((note) => `- ${note}`),
+  ];
+}
+
 function formatSqlBlock(query: string | undefined): string[] {
   return [
     "```sql",
@@ -82,6 +95,7 @@ export function formatReadableReport(
     "",
     "## Evidence",
     ...formatEvidence(result),
+    ...formatParserLimitations(result),
     "",
     "## Business Meaning",
     `- Query A (${result.metric_name_a}): ${result.likely_business_meaning_a}`,
