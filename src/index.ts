@@ -7,6 +7,11 @@ export {
 
 export { formatPrComment } from "./output/formatPrComment.js";
 
+export {
+  gitDiffFilesToCandidates,
+  parseGitDiffNameStatus,
+} from "./gitDiffParser.js";
+
 export type {
   ConfidenceLevel,
   DetectedDifference,
@@ -17,3 +22,10 @@ export type {
   RiskLevel,
   SemanticComparisonResult,
 } from "./types.js";
+
+export type {
+  GitDiffChangedFile,
+  GitDiffFileStatus,
+  GitDiffNameStatusParseResult,
+  GitDiffParseSkippedLine,
+} from "./gitDiffParser.js";
