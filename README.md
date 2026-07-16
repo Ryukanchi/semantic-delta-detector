@@ -118,7 +118,49 @@ ignore:
 
 The CLI `--fail-on` flag overrides `semantic-delta.yml` when both are present.
 The CLI `--before` and `--after` flags override `default_before_path` and `default_after_path`.
-The `include` and `ignore` lists are parsed as simple path pattern config for future repository-aware workflows; they do not enable automatic repository scanning yet.
+The `include` and `ignore` lists are applied by local Git comparison mode. They do not change explicit `--before` / `--after` comparisons.
+
+## Local Git Comparison
+
+Compare changed SQL files between two local Git refs without modifying the repository or calling GitHub:
+
+```bash
+npm run compare -- --changed-from main --changed-to HEAD
+```
+
+`--changed-from` is required. `--changed-to` defaults to `HEAD`, and `--repo` defaults to the current directory. To inspect another local repository:
+
+```bash
+npm run compare -- --changed-from origin/main --repo ../analytics-repo
+```
+
+Git mode discovers changed-file statuses, applies `semantic-delta.yml` path rules, loads before/after contents from the selected refs, and produces one aggregate report. When no `include` rules are configured, only `**/*.sql` files are candidates. `ignore` rules take precedence over `include` rules.
+
+Every discovered row receives a visible disposition. Modified files and complete renames can be analyzed. Added files, deleted files, unknown statuses, filtered paths, malformed Git rows, and content-loading failures are reported as skipped with a reason. Renames are filtered using their new path while the old path remains visible and is used for base-ref content.
+
+Preview a concise simulated PR-style aggregate comment:
+
+```bash
+npm run compare -- --changed-from origin/main --changed-to HEAD --pr
+```
+
+This only prints text. It does not post a PR comment or call the GitHub API.
+
+Machine-readable output preserves analyzed files, skipped rows, warnings, refs, and summary counts:
+
+```bash
+npm run --silent compare -- --changed-from origin/main --format json
+```
+
+Aggregate CI gating uses the highest risk among analyzed files:
+
+```bash
+npm run compare -- --changed-from origin/main --fail-on high
+```
+
+Skipped added/deleted files do not fail the semantic gate, and a run with no comparable files exits successfully unless Git or CLI validation itself fails.
+
+Git mode remains heuristic. It does not prove SQL equivalence, does not fully model complex SQL such as CTEs or subqueries, and does not yet assign semantic risk to newly added or deleted metrics.
 
 ## Low-Risk Example
 Semantic Delta should not warn on formatting-only changes. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.

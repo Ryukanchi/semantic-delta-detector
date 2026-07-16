@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { parseFailOnThreshold, shouldFailForRisk } from "../src/ciGating.js";
+import {
+  getHighestSeverity,
+  parseFailOnThreshold,
+  shouldFailForRisk,
+} from "../src/ciGating.js";
 
 test("CI severity gating compares risks against thresholds", () => {
   assert.equal(shouldFailForRisk("high", "high"), true);
@@ -13,6 +17,12 @@ test("CI severity gating compares risks against thresholds", () => {
     () => parseFailOnThreshold("urgent"),
     /Invalid --fail-on value "urgent". Supported values: low, medium, high, critical\./,
   );
+});
+
+test("CI severity helpers return the highest discovered severity", () => {
+  assert.equal(getHighestSeverity([]), "low");
+  assert.equal(getHighestSeverity(["low", "medium", "high", "medium"]), "high");
+  assert.equal(getHighestSeverity(["critical", "high"]), "critical");
 });
 
 test("CLI --fail-on exits non-zero only at or above the configured threshold", () => {

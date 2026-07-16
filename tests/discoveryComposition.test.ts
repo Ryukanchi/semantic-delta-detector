@@ -5,7 +5,6 @@ import { composeCandidateDiscovery } from "../src/discoveryComposition.js";
 test("discovery composition pairs one modified SQL file", () => {
   assert.deepEqual(
     composeCandidateDiscovery({
-      paths: ["models/revenue.sql"],
       candidates: [
         {
           path: "models/revenue.sql",
@@ -43,7 +42,6 @@ test("discovery composition pairs one modified SQL file", () => {
 test("discovery composition skips ignored paths before pairing", () => {
   assert.deepEqual(
     composeCandidateDiscovery({
-      paths: ["docs/example.sql"],
       candidates: [
         {
           path: "docs/example.sql",
@@ -75,7 +73,6 @@ test("discovery composition skips ignored paths before pairing", () => {
 test("discovery composition excludes non-matching include candidates", () => {
   assert.deepEqual(
     composeCandidateDiscovery({
-      paths: ["docs/revenue.sql"],
       candidates: [
         {
           path: "docs/revenue.sql",
@@ -107,7 +104,6 @@ test("discovery composition excludes non-matching include candidates", () => {
 test("discovery composition lets pairing skip added files after path inclusion", () => {
   assert.deepEqual(
     composeCandidateDiscovery({
-      paths: ["models/new_metric.sql"],
       candidates: [
         {
           path: "models/new_metric.sql",
@@ -143,7 +139,6 @@ test("discovery composition lets pairing skip added files after path inclusion",
 
 test("discovery composition preserves ordering through filtering and pairing", () => {
   const result = composeCandidateDiscovery({
-    paths: ["models/a.sql", "docs/skip.sql", "models/new.sql", "models/b.sql"],
     candidates: [
       {
         path: "models/a.sql",
@@ -193,8 +188,14 @@ test("discovery composition preserves ordering through filtering and pairing", (
 
 test("discovery composition preserves skipped path reasons", () => {
   const result = composeCandidateDiscovery({
-    paths: ["docs/example.sql"],
-    candidates: [],
+    candidates: [
+      {
+        path: "docs/example.sql",
+        status: "modified",
+        hasBefore: true,
+        hasAfter: true,
+      },
+    ],
     ignore: ["docs/**"],
   });
 
@@ -208,7 +209,6 @@ test("discovery composition preserves skipped path reasons", () => {
 
 test("discovery composition preserves skipped pairing reasons", () => {
   const result = composeCandidateDiscovery({
-    paths: ["models/revenue.sql"],
     candidates: [
       {
         path: "models/revenue.sql",
@@ -225,4 +225,48 @@ test("discovery composition preserves skipped pairing reasons", () => {
       reason: "skipped because no after version exists",
     },
   ]);
+});
+
+test("every candidate receives a filtering or pairing disposition", () => {
+  const candidates = [
+    {
+      path: "models/revenue.sql",
+      status: "modified" as const,
+      hasBefore: true,
+      hasAfter: true,
+    },
+    {
+      path: "docs/ignored.sql",
+      status: "modified" as const,
+      hasBefore: true,
+      hasAfter: true,
+    },
+    {
+      path: "models/new.sql",
+      status: "added" as const,
+      hasBefore: false,
+      hasAfter: true,
+    },
+    {
+      path: "models/revenue.sql",
+      status: "unknown" as const,
+      hasBefore: false,
+      hasAfter: false,
+    },
+  ];
+  const result = composeCandidateDiscovery({
+    candidates,
+    include: ["models/**"],
+    ignore: ["docs/**"],
+  });
+
+  const dispositionCount =
+    result.pathFiltering.skipped.length +
+    result.pairing.pairs.length +
+    result.pairing.skipped.length;
+  assert.equal(dispositionCount, candidates.length);
+  assert.deepEqual(
+    result.pathFiltering.included.map((item) => item.path),
+    ["models/revenue.sql", "models/new.sql", "models/revenue.sql"],
+  );
 });

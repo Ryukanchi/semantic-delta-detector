@@ -37,3 +37,17 @@ export function shouldFailForRisk(
 ): boolean {
   return severityOrder[resultRisk] >= severityOrder[threshold];
 }
+
+export function getHighestSeverity(
+  severities: SeverityThreshold[],
+): SeverityThreshold {
+  let highest: SeverityThreshold = "low";
+
+  for (const severity of severities) {
+    if (shouldFailForRisk(severity, highest)) {
+      highest = severity;
+    }
+  }
+
+  return highest;
+}
