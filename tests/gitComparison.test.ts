@@ -163,3 +163,45 @@ test("keeps parser-only malformed output observable", () => {
   assert.equal(result.skipped[0].stage, "git-parse");
   assert.equal(result.skipped[0].line, "not-tab-separated");
 });
+
+test("uses SQL files as the safe default candidate set", () => {
+  const result = compareGitChanges(
+    {
+      repositoryPath: process.cwd(),
+      baseRef: "BASE",
+      headRef: "HEAD",
+    },
+    comparisonRunner(
+      "M\tREADME.md\nM\tmetric.sql",
+      [
+        commandResult(0, "SELECT COUNT(*) FROM users"),
+        commandResult(0, "SELECT COUNT(*) FROM users"),
+      ],
+    ),
+  );
+
+  assert.equal(result.summary.discoveredCount, 2);
+  assert.equal(result.summary.analyzedCount, 1);
+  assert.equal(result.summary.skippedCount, 1);
+  assert.equal(result.analyzed[0].path, "metric.sql");
+  assert.equal(result.skipped[0].path, "README.md");
+  assert.equal(result.skipped[0].stage, "path-filter");
+});
+
+test("preserves both rename paths when the new path is filtered out", () => {
+  const result = compareWithRunner(
+    "R100\tdocs/old_metric.sql\tdocs/new_metric.sql",
+  );
+
+  assert.equal(result.summary.discoveredCount, 1);
+  assert.equal(result.summary.analyzedCount, 0);
+  assert.deepEqual(result.skipped, [
+    {
+      stage: "path-filter",
+      path: "docs/new_metric.sql",
+      beforePath: "docs/old_metric.sql",
+      afterPath: "docs/new_metric.sql",
+      reason: "excluded by ignore pattern: docs/**",
+    },
+  ]);
+});

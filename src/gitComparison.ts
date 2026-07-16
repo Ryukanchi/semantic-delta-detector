@@ -2,6 +2,7 @@ import { compareSqlQueries } from "./analyzer/differenceEngine.js";
 import type { SeverityThreshold } from "./ciGating.js";
 import { getHighestSeverity, getResultSeverity } from "./ciGating.js";
 import { composeCandidateDiscovery } from "./discoveryComposition.js";
+import type { CandidateFile } from "./candidatePairing.js";
 import {
   discoverGitChangedFiles,
   loadGitPairContent,
@@ -58,6 +59,29 @@ export interface CompareGitChangesOptions extends GitDiscoveryOptions {
   ignore?: string[];
 }
 
+function mapPathFilteredSkips(
+  candidates: CandidateFile[],
+  skippedPaths: Array<{ path: string; reason: string }>,
+): GitComparisonSkippedFile[] {
+  const candidatesByPath = new Map<string, CandidateFile[]>();
+  for (const candidate of candidates) {
+    const queuedCandidates = candidatesByPath.get(candidate.path) ?? [];
+    queuedCandidates.push(candidate);
+    candidatesByPath.set(candidate.path, queuedCandidates);
+  }
+
+  return skippedPaths.map((item) => {
+    const candidate = candidatesByPath.get(item.path)?.shift();
+    return {
+      stage: "path-filter",
+      path: item.path,
+      ...(candidate?.beforePath ? { beforePath: candidate.beforePath } : {}),
+      ...(candidate?.afterPath ? { afterPath: candidate.afterPath } : {}),
+      reason: item.reason,
+    };
+  });
+}
+
 function formatContentFailures(
   failures: ReturnType<typeof loadGitPairContent>["failures"],
 ): string {
@@ -74,9 +98,10 @@ export function compareGitChanges(
   runner: GitCommandRunner = runGitCommand,
 ): GitComparisonResult {
   const discovery = discoverGitChangedFiles(options, runner);
+  const include = options.include?.length ? options.include : ["**/*.sql"];
   const composition = composeCandidateDiscovery({
     candidates: discovery.candidates,
-    include: options.include,
+    include,
     ignore: options.ignore,
   });
   const skipped: GitComparisonSkippedFile[] = [
@@ -85,11 +110,7 @@ export function compareGitChanges(
       line: item.line,
       reason: item.reason,
     })),
-    ...composition.pathFiltering.skipped.map((item) => ({
-      stage: "path-filter" as const,
-      path: item.path,
-      reason: item.reason,
-    })),
+    ...mapPathFilteredSkips(discovery.candidates, composition.pathFiltering.skipped),
     ...composition.pairing.skipped.map((item) => ({
       stage: "pairing" as const,
       path: item.path,
