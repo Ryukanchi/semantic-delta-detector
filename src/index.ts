@@ -44,8 +44,6 @@ export type {
 } from "./gitDiffParser.js";
 
 export type {
-  GitCommandResult,
-  GitCommandRunner,
   GitContentLoadFailure,
   GitDiscoveryOptions,
   GitDiscoveryResult,

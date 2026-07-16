@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  compareGitChanges,
-  type GitComparisonResult,
-} from "../src/gitComparison.js";
+import type { GitComparisonResult } from "../src/gitComparison.js";
+import { compareGitChangesWithRunner as compareGitChanges } from "../src/internal/gitComparisonRuntime.js";
 import type {
   GitCommandResult,
   GitCommandRunner,
-} from "../src/gitDiscovery.js";
+} from "../src/internal/gitDiscoveryRuntime.js";
 
 const baseCommit = "1".repeat(40);
 const headCommit = "2".repeat(40);

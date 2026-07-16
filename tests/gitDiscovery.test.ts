@@ -3,14 +3,16 @@ import test from "node:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  discoverGitChangedFiles,
   GitDiscoveryError,
-  loadGitPairContent,
-  type GitCommandResult,
-  type GitCommandRunner,
   type GitPairContentResult,
   type VerifiedGitCommitHash,
 } from "../src/gitDiscovery.js";
+import {
+  discoverGitChangedFilesWithRunner as discoverGitChangedFiles,
+  loadGitPairContentWithRunner as loadGitPairContent,
+  type GitCommandResult,
+  type GitCommandRunner,
+} from "../src/internal/gitDiscoveryRuntime.js";
 
 const baseCommit = "a".repeat(40) as VerifiedGitCommitHash;
 const headCommit = "b".repeat(40) as VerifiedGitCommitHash;
