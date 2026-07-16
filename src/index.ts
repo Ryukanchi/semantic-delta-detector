@@ -12,6 +12,12 @@ export {
   parseGitDiffNameStatus,
 } from "./gitDiffParser.js";
 
+export {
+  discoverGitChangedFiles,
+  GitDiscoveryError,
+  loadGitPairContent,
+} from "./gitDiscovery.js";
+
 export type {
   ConfidenceLevel,
   DetectedDifference,
@@ -29,3 +35,13 @@ export type {
   GitDiffNameStatusParseResult,
   GitDiffParseSkippedLine,
 } from "./gitDiffParser.js";
+
+export type {
+  GitCommandResult,
+  GitCommandRunner,
+  GitContentLoadFailure,
+  GitDiscoveryOptions,
+  GitDiscoveryResult,
+  GitPairContentResult,
+  LoadGitPairContentOptions,
+} from "./gitDiscovery.js";

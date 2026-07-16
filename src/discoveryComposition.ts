@@ -9,7 +9,6 @@ import {
 } from "./pathFilter.js";
 
 export interface ComposeCandidateDiscoveryInput {
-  paths: string[];
   candidates: CandidateFile[];
   include?: string[];
   ignore?: string[];
@@ -23,7 +22,7 @@ export interface CandidateDiscoveryCompositionResult {
 export function composeCandidateDiscovery(
   input: ComposeCandidateDiscoveryInput,
 ): CandidateDiscoveryCompositionResult {
-  const pathFiltering = filterCandidatePaths(input.paths, {
+  const pathFiltering = filterCandidatePaths(input.candidates.map((candidate) => candidate.path), {
     include: input.include,
     ignore: input.ignore,
   });

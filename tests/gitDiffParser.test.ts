@@ -185,7 +185,6 @@ test("feeds parsed git rows through discovery composition", () => {
     ].join("\n"),
   );
   const result = composeCandidateDiscovery({
-    paths: parsed.files.map((file) => file.path),
     candidates: gitDiffFilesToCandidates(parsed.files),
     include: ["models/**"],
     ignore: [],
