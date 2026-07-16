@@ -149,7 +149,7 @@ This only prints text. It does not post a PR comment or call the GitHub API.
 Machine-readable output preserves analyzed files, skipped rows, warnings, refs, and summary counts:
 
 ```bash
-npm run compare -- --changed-from origin/main --format json
+npm run --silent compare -- --changed-from origin/main --format json
 ```
 
 Aggregate CI gating uses the highest risk among analyzed files:

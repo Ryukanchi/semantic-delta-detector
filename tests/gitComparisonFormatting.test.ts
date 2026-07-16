@@ -131,3 +131,27 @@ test("formats a calm report when no files are comparable", () => {
   assert.match(comment, /No comparable files were analyzed/);
   assert.doesNotMatch(comment, /alters the meaning/i);
 });
+
+test("distinguishes no changed files from non-comparable changed files", () => {
+  const result: GitComparisonResult = {
+    repositoryPath: "/tmp/repo",
+    baseRef: "HEAD",
+    headRef: "HEAD",
+    resolvedBaseRef: "a".repeat(40),
+    resolvedHeadRef: "a".repeat(40),
+    analyzed: [],
+    skipped: [],
+    warnings: [],
+    summary: {
+      discoveredCount: 0,
+      analyzedCount: 0,
+      skippedCount: 0,
+      highestSeverity: "low",
+    },
+  };
+
+  const comment = formatGitComparisonPrComment(result);
+
+  assert.match(comment, /No changed files were discovered between these refs\./);
+  assert.doesNotMatch(comment, /Skipped changes are listed below/);
+});

@@ -168,7 +168,9 @@ export function formatGitComparisonPrComment(result: GitComparisonResult): strin
   const lines = [
     `${severityEmoji(severity)} ${formatSeverity(severity)} RISK — ${result.summary.analyzedCount} analyzed, ${result.summary.skippedCount} skipped`,
     result.analyzed.length === 0
-      ? "No comparable files were analyzed. Skipped changes are listed below."
+      ? result.summary.discoveredCount === 0
+        ? "No changed files were discovered between these refs."
+        : "No comparable files were analyzed. Skipped changes are listed below."
       : severity === "low"
         ? "No meaningful semantic change was detected in the analyzed files."
         : "At least one analyzed SQL file may change metric meaning.",
