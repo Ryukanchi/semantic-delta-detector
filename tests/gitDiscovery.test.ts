@@ -8,10 +8,12 @@ import {
   loadGitPairContent,
   type GitCommandResult,
   type GitCommandRunner,
+  type GitPairContentResult,
+  type VerifiedGitCommitHash,
 } from "../src/gitDiscovery.js";
 
-const baseCommit = "a".repeat(40);
-const headCommit = "b".repeat(40);
+const baseCommit = "a".repeat(40) as VerifiedGitCommitHash;
+const headCommit = "b".repeat(40) as VerifiedGitCommitHash;
 
 function commandResult(
   status: number,
@@ -231,6 +233,69 @@ test("loads before and after contents using resolved refs and pair paths", () =>
   assert.equal(result.afterContent, "SELECT COUNT(*) FROM new_table\n");
   assert.deepEqual(result.failures, []);
 });
+
+const invalidContentLoaderRefs = [
+  {
+    name: "an option-like ref",
+    baseRef: "-L1,2",
+    headRef: headCommit,
+  },
+  {
+    name: "a symbolic ref",
+    baseRef: baseCommit,
+    headRef: "HEAD",
+  },
+  {
+    name: "a branch name",
+    baseRef: "feature/local-git-mvp",
+    headRef: headCommit,
+  },
+  {
+    name: "a malformed hash",
+    baseRef: "g".repeat(40),
+    headRef: headCommit,
+  },
+  {
+    name: "an abbreviated hash",
+    baseRef: "a".repeat(12),
+    headRef: headCommit,
+  },
+];
+
+for (const invalidCase of invalidContentLoaderRefs) {
+  test(`rejects ${invalidCase.name} before loading Git content`, () => {
+    let gitCallCount = 0;
+    let result: GitPairContentResult | undefined;
+    const runner: GitCommandRunner = () => {
+      gitCallCount += 1;
+      return commandResult(0, "fake history or diff output");
+    };
+
+    assert.throws(
+      () => {
+        result = loadGitPairContent(
+          {
+            repositoryPath: process.cwd(),
+            baseRef: invalidCase.baseRef as VerifiedGitCommitHash,
+            headRef: invalidCase.headRef as VerifiedGitCommitHash,
+            pair: {
+              beforePath: "README.md",
+              afterPath: "README.md",
+              displayPath: "README.md",
+            },
+          },
+          runner,
+        );
+      },
+      (error: unknown) =>
+        error instanceof GitDiscoveryError &&
+        /requires a full 40- or 64-character hexadecimal commit hash/.test(error.message),
+    );
+
+    assert.equal(gitCallCount, 0);
+    assert.equal(result, undefined);
+  });
+}
 
 test("does not claim unavailable or non-text Git content exists", () => {
   const runner = queuedRunner(

@@ -18,6 +18,10 @@ export interface GitCommandResult {
 
 export type GitCommandRunner = (args: readonly string[]) => GitCommandResult;
 
+export type VerifiedGitCommitHash = string & {
+  readonly __verifiedGitCommitHash: unique symbol;
+};
+
 export interface GitDiscoveryOptions {
   repositoryPath: string;
   baseRef: string;
@@ -28,8 +32,8 @@ export interface GitDiscoveryResult {
   repositoryPath: string;
   baseRef: string;
   headRef: string;
-  resolvedBaseRef: string;
-  resolvedHeadRef: string;
+  resolvedBaseRef: VerifiedGitCommitHash;
+  resolvedHeadRef: VerifiedGitCommitHash;
   files: GitDiffChangedFile[];
   candidates: CandidateFile[];
   parserSkipped: GitDiffParseSkippedLine[];
@@ -53,8 +57,10 @@ export interface GitPairContentResult {
 
 export interface LoadGitPairContentOptions {
   repositoryPath: string;
-  baseRef: string;
-  headRef: string;
+  /** Full commit hash returned by verified Git ref resolution. */
+  baseRef: VerifiedGitCommitHash;
+  /** Full commit hash returned by verified Git ref resolution. */
+  headRef: VerifiedGitCommitHash;
   pair: CandidatePair;
 }
 
@@ -66,6 +72,7 @@ export class GitDiscoveryError extends Error {
 }
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const fullGitCommitHashPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export const runGitCommand: GitCommandRunner = (args) => {
   const result = spawnSync("git", [...args], {
@@ -88,6 +95,25 @@ function decodeUtf8(buffer: Buffer, label: string): string {
   } catch {
     throw new GitDiscoveryError(`${label} was not valid UTF-8.`);
   }
+}
+
+function isFullGitCommitHash(value: unknown): value is VerifiedGitCommitHash {
+  return typeof value === "string" && fullGitCommitHashPattern.test(value);
+}
+
+function requireVerifiedGitCommitHash(
+  value: unknown,
+  label: "base" | "head",
+): VerifiedGitCommitHash {
+  if (!isFullGitCommitHash(value)) {
+    const invalidValue =
+      typeof value === "string" ? `"${value}"` : `of type ${typeof value}`;
+    throw new GitDiscoveryError(
+      `Invalid ${label} commit hash ${invalidValue}. Git content loading requires a full 40- or 64-character hexadecimal commit hash produced by verified ref resolution.`,
+    );
+  }
+
+  return value;
 }
 
 function formatFailure(result: GitCommandResult): string {
@@ -152,7 +178,7 @@ function resolveCommitRef(
   ref: string,
   label: "base" | "head",
   warnings: string[],
-): string {
+): VerifiedGitCommitHash {
   const result = runRequiredGitCommand(
     runner,
     [
@@ -170,7 +196,7 @@ function resolveCommitRef(
   }
 
   const commit = decodeUtf8(result.stdout, `Resolved ${label} ref`).trim();
-  if (!/^[0-9a-f]{40,64}$/i.test(commit)) {
+  if (!isFullGitCommitHash(commit)) {
     throw new GitDiscoveryError(
       `Resolved ${label} ref "${ref}" did not produce a valid commit hash.`,
     );
@@ -248,7 +274,7 @@ export function discoverGitChangedFiles(
 function loadGitContentSide(
   runner: GitCommandRunner,
   repositoryPath: string,
-  ref: string,
+  ref: VerifiedGitCommitHash,
   path: string,
   side: GitContentLoadFailure["side"],
 ): { content?: string; failure?: GitContentLoadFailure; warning?: string } {
@@ -310,17 +336,19 @@ export function loadGitPairContent(
   options: LoadGitPairContentOptions,
   runner: GitCommandRunner = runGitCommand,
 ): GitPairContentResult {
+  const baseRef = requireVerifiedGitCommitHash(options.baseRef, "base");
+  const headRef = requireVerifiedGitCommitHash(options.headRef, "head");
   const before = loadGitContentSide(
     runner,
     options.repositoryPath,
-    options.baseRef,
+    baseRef,
     options.pair.beforePath,
     "before",
   );
   const after = loadGitContentSide(
     runner,
     options.repositoryPath,
-    options.headRef,
+    headRef,
     options.pair.afterPath,
     "after",
   );

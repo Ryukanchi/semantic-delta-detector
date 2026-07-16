@@ -51,6 +51,7 @@ export type {
   GitDiscoveryResult,
   GitPairContentResult,
   LoadGitPairContentOptions,
+  VerifiedGitCommitHash,
 } from "./gitDiscovery.js";
 
 export type {
