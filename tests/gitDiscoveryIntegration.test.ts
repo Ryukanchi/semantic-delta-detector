@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   discoverGitChangedFiles,
+  GitDiscoveryError,
   loadGitPairContent,
+  runGitCommand,
+  type GitCommandRunner,
+  type GitPairContentResult,
+  type VerifiedGitCommitHash,
 } from "../src/gitDiscovery.js";
 import { composeCandidateDiscovery } from "../src/discoveryComposition.js";
 
@@ -35,6 +40,13 @@ function writeRepositoryFile(repositoryPath: string, path: string, contents: str
   const fullPath = join(repositoryPath, path);
   mkdirSync(dirname(fullPath), { recursive: true });
   writeFileSync(fullPath, contents, "utf8");
+}
+
+function recordingGitRunner(calls: string[][]): GitCommandRunner {
+  return (args) => {
+    calls.push([...args]);
+    return runGitCommand(args);
+  };
 }
 
 test("discovers and reads real modified, added, deleted, and renamed Git files", () => {
@@ -71,6 +83,13 @@ test("discovers and reads real modified, added, deleted, and renamed Git files",
     runGit(repositoryPath, ["add", "--", "."]);
     runGit(repositoryPath, ["commit", "-m", "initial"]);
     const baseRef = runGit(repositoryPath, ["rev-parse", "HEAD"]);
+    const treeObject = runGit(repositoryPath, ["rev-parse", `${baseRef}^{tree}`]);
+    const blobObject = runGit(repositoryPath, [
+      "rev-parse",
+      `${baseRef}:models/revenue.sql`,
+    ]);
+    runGit(repositoryPath, ["tag", "-a", "fixture-tag", "-m", "fixture tag", baseRef]);
+    const tagObject = runGit(repositoryPath, ["rev-parse", "fixture-tag^{tag}"]);
 
     writeRepositoryFile(
       repositoryPath,
@@ -125,15 +144,71 @@ test("discovers and reads real modified, added, deleted, and renamed Git files",
     );
 
     const renamedPair = composition.pairing.pairs[0];
-    const renamedContent = loadGitPairContent({
-      repositoryPath,
-      baseRef: discovery.resolvedBaseRef,
-      headRef: discovery.resolvedHeadRef,
-      pair: renamedPair,
-    });
+    const validCommitCalls: string[][] = [];
+    const renamedContent = loadGitPairContent(
+      {
+        repositoryPath,
+        baseRef: discovery.resolvedBaseRef,
+        headRef: discovery.resolvedHeadRef,
+        pair: renamedPair,
+      },
+      recordingGitRunner(validCommitCalls),
+    );
     assert.equal(renamedContent.failures.length, 0);
     assert.equal(renamedContent.beforeContent, "SELECT COUNT(*) FROM stable_source\n");
     assert.equal(renamedContent.afterContent, "SELECT COUNT(*) FROM stable_source\n");
+    assert.deepEqual(
+      validCommitCalls.map((args) => args[2]),
+      ["cat-file", "cat-file", "show", "show"],
+    );
+
+    for (const invalidObject of [
+      { name: "tree", hash: treeObject },
+      { name: "blob", hash: blobObject },
+      { name: "tag", hash: tagObject },
+    ]) {
+      const calls: string[][] = [];
+      let invalidResult: GitPairContentResult | undefined;
+      assert.throws(
+        () => {
+          invalidResult = loadGitPairContent(
+            {
+              repositoryPath,
+              baseRef: invalidObject.hash as VerifiedGitCommitHash,
+              headRef: discovery.resolvedHeadRef,
+              pair: renamedPair,
+            },
+            recordingGitRunner(calls),
+          );
+        },
+        (error: unknown) =>
+          error instanceof GitDiscoveryError &&
+          error.message.includes(`Git reported "${invalidObject.name}"`),
+      );
+      assert.equal(calls.some((args) => args[2] === "show"), false);
+      assert.equal(invalidResult, undefined);
+    }
+
+    const nonexistentCalls: string[][] = [];
+    let nonexistentResult: GitPairContentResult | undefined;
+    assert.throws(
+      () => {
+        nonexistentResult = loadGitPairContent(
+          {
+            repositoryPath,
+            baseRef: "0".repeat(40) as VerifiedGitCommitHash,
+            headRef: discovery.resolvedHeadRef,
+            pair: renamedPair,
+          },
+          recordingGitRunner(nonexistentCalls),
+        );
+      },
+      (error: unknown) =>
+        error instanceof GitDiscoveryError &&
+        /Could not verify base commit hash/.test(error.message),
+    );
+    assert.equal(nonexistentCalls.some((args) => args[2] === "show"), false);
+    assert.equal(nonexistentResult, undefined);
 
     const modifiedPair = composition.pairing.pairs[1];
     const modifiedContent = loadGitPairContent({

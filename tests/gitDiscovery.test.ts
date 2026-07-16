@@ -202,6 +202,8 @@ test("loads before and after contents using resolved refs and pair paths", () =>
     },
     queuedRunner(
       [
+        commandResult(0, "commit\n"),
+        commandResult(0, "commit\n"),
         commandResult(0, "SELECT COUNT(*) FROM old_table\n"),
         commandResult(0, "SELECT COUNT(*) FROM new_table\n"),
       ],
@@ -212,6 +214,20 @@ test("loads before and after contents using resolved refs and pair paths", () =>
   assert.deepEqual(calls[0], [
     "-C",
     "/repo path",
+    "cat-file",
+    "-t",
+    baseCommit,
+  ]);
+  assert.deepEqual(calls[1], [
+    "-C",
+    "/repo path",
+    "cat-file",
+    "-t",
+    headCommit,
+  ]);
+  assert.deepEqual(calls[2], [
+    "-C",
+    "/repo path",
     "show",
     "--no-ext-diff",
     "--no-textconv",
@@ -219,7 +235,7 @@ test("loads before and after contents using resolved refs and pair paths", () =>
     `${baseCommit}:models/old name.sql`,
     "--",
   ]);
-  assert.deepEqual(calls[1], [
+  assert.deepEqual(calls[3], [
     "-C",
     "/repo path",
     "show",
@@ -297,9 +313,85 @@ for (const invalidCase of invalidContentLoaderRefs) {
   });
 }
 
+test("rejects a nonexistent full hash before loading Git content", () => {
+  const nonexistentHash = "0".repeat(40) as VerifiedGitCommitHash;
+  const calls: string[][] = [];
+  let result: GitPairContentResult | undefined;
+
+  assert.throws(
+    () => {
+      result = loadGitPairContent(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: nonexistentHash,
+          headRef: headCommit,
+          pair: {
+            beforePath: "README.md",
+            afterPath: "README.md",
+            displayPath: "README.md",
+          },
+        },
+        queuedRunner(
+          [commandResult(128, "", "fatal: git cat-file could not get object info")],
+          calls,
+        ),
+      );
+    },
+    (error: unknown) =>
+      error instanceof GitDiscoveryError &&
+      /Could not verify base commit hash/.test(error.message) &&
+      /could not get object info/.test(error.message),
+  );
+
+  assert.deepEqual(calls, [
+    ["-C", process.cwd(), "cat-file", "-t", nonexistentHash],
+  ]);
+  assert.equal(calls.some((args) => args[2] === "show"), false);
+  assert.equal(result, undefined);
+});
+
+test("rejects a non-commit head before loading either side", () => {
+  const calls: string[][] = [];
+  let result: GitPairContentResult | undefined;
+
+  assert.throws(
+    () => {
+      result = loadGitPairContent(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: baseCommit,
+          headRef: headCommit,
+          pair: {
+            beforePath: "README.md",
+            afterPath: "README.md",
+            displayPath: "README.md",
+          },
+        },
+        queuedRunner(
+          [commandResult(0, "commit\n"), commandResult(0, "tree\n")],
+          calls,
+        ),
+      );
+    },
+    (error: unknown) =>
+      error instanceof GitDiscoveryError &&
+      /Invalid head commit hash/.test(error.message) &&
+      /Git reported "tree"/.test(error.message),
+  );
+
+  assert.deepEqual(
+    calls.map((args) => args[2]),
+    ["cat-file", "cat-file"],
+  );
+  assert.equal(calls.some((args) => args[2] === "show"), false);
+  assert.equal(result, undefined);
+});
+
 test("does not claim unavailable or non-text Git content exists", () => {
   const runner = queuedRunner(
     [
+      commandResult(0, "commit\n"),
+      commandResult(0, "commit\n"),
       commandResult(128, "", "fatal: path does not exist in base"),
       {
         status: 0,
@@ -345,6 +437,8 @@ test("reports invalid UTF-8 content as a content-load failure", () => {
     },
     queuedRunner(
       [
+        commandResult(0, "commit\n"),
+        commandResult(0, "commit\n"),
         {
           status: 0,
           stdout: Buffer.from([0xc3, 0x28]),

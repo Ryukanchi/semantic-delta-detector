@@ -9,6 +9,7 @@ import {
   runGitCommand,
   type GitCommandRunner,
   type GitDiscoveryOptions,
+  type VerifiedGitCommitHash,
 } from "./gitDiscovery.js";
 import type { SemanticComparisonResult } from "./types.js";
 
@@ -46,8 +47,8 @@ export interface GitComparisonResult {
   repositoryPath: string;
   baseRef: string;
   headRef: string;
-  resolvedBaseRef: string;
-  resolvedHeadRef: string;
+  resolvedBaseRef: VerifiedGitCommitHash;
+  resolvedHeadRef: VerifiedGitCommitHash;
   analyzed: GitAnalyzedFile[];
   skipped: GitComparisonSkippedFile[];
   warnings: string[];

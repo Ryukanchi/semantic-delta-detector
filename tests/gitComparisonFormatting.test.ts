@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compareSqlQueries } from "../src/analyzer/differenceEngine.js";
 import type { GitComparisonResult } from "../src/gitComparison.js";
+import type { VerifiedGitCommitHash } from "../src/gitDiscovery.js";
 import {
   formatGitComparisonPrComment,
   formatGitComparisonReport,
 } from "../src/output/formatGitComparison.js";
+
+const baseCommit = "a".repeat(40) as VerifiedGitCommitHash;
+const headCommit = "b".repeat(40) as VerifiedGitCommitHash;
 
 function buildResult(): GitComparisonResult {
   const lowResult = compareSqlQueries(
@@ -21,8 +25,8 @@ function buildResult(): GitComparisonResult {
     repositoryPath: "/tmp/example repo",
     baseRef: "origin/main",
     headRef: "HEAD",
-    resolvedBaseRef: "a".repeat(40),
-    resolvedHeadRef: "b".repeat(40),
+    resolvedBaseRef: baseCommit,
+    resolvedHeadRef: headCommit,
     analyzed: [
       {
         path: "models/low.sql",
@@ -104,8 +108,8 @@ test("formats a calm report when no files are comparable", () => {
     repositoryPath: "/tmp/repo",
     baseRef: "BASE",
     headRef: "HEAD",
-    resolvedBaseRef: "a".repeat(40),
-    resolvedHeadRef: "b".repeat(40),
+    resolvedBaseRef: baseCommit,
+    resolvedHeadRef: headCommit,
     analyzed: [],
     skipped: [
       {
@@ -137,8 +141,8 @@ test("distinguishes no changed files from non-comparable changed files", () => {
     repositoryPath: "/tmp/repo",
     baseRef: "HEAD",
     headRef: "HEAD",
-    resolvedBaseRef: "a".repeat(40),
-    resolvedHeadRef: "a".repeat(40),
+    resolvedBaseRef: baseCommit,
+    resolvedHeadRef: baseCommit,
     analyzed: [],
     skipped: [],
     warnings: [],

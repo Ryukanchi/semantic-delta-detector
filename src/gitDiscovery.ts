@@ -18,6 +18,7 @@ export interface GitCommandResult {
 
 export type GitCommandRunner = (args: readonly string[]) => GitCommandResult;
 
+/** Full Git commit ID produced after verification; loaders reverify it per repository. */
 export type VerifiedGitCommitHash = string & {
   readonly __verifiedGitCommitHash: unique symbol;
 };
@@ -57,9 +58,9 @@ export interface GitPairContentResult {
 
 export interface LoadGitPairContentOptions {
   repositoryPath: string;
-  /** Full commit hash returned by verified Git ref resolution. */
+  /** Full commit hash; reverified in repositoryPath before content loading. */
   baseRef: VerifiedGitCommitHash;
-  /** Full commit hash returned by verified Git ref resolution. */
+  /** Full commit hash; reverified in repositoryPath before content loading. */
   headRef: VerifiedGitCommitHash;
   pair: CandidatePair;
 }
@@ -97,14 +98,14 @@ function decodeUtf8(buffer: Buffer, label: string): string {
   }
 }
 
-function isFullGitCommitHash(value: unknown): value is VerifiedGitCommitHash {
+function isFullGitCommitHash(value: unknown): value is string {
   return typeof value === "string" && fullGitCommitHashPattern.test(value);
 }
 
-function requireVerifiedGitCommitHash(
+function requireFullGitCommitHash(
   value: unknown,
   label: "base" | "head",
-): VerifiedGitCommitHash {
+): string {
   if (!isFullGitCommitHash(value)) {
     const invalidValue =
       typeof value === "string" ? `"${value}"` : `of type ${typeof value}`;
@@ -147,6 +148,33 @@ function runRequiredGitCommand(
   return {
     stdout: result.stdout,
     ...(warning ? { warning } : {}),
+  };
+}
+
+function verifyGitCommitHashInRepository(
+  runner: GitCommandRunner,
+  repositoryPath: string,
+  value: string,
+  label: "base" | "head",
+): { hash: VerifiedGitCommitHash; warning?: string } {
+  const objectTypeResult = runRequiredGitCommand(
+    runner,
+    ["-C", repositoryPath, "cat-file", "-t", value],
+    `Could not verify ${label} commit hash "${value}" in repository ${repositoryPath}`,
+  );
+  const objectType = decodeUtf8(
+    objectTypeResult.stdout,
+    `Git object type for ${label} commit hash ${value}`,
+  ).trim();
+  if (objectType !== "commit") {
+    throw new GitDiscoveryError(
+      `Invalid ${label} commit hash "${value}". Expected a commit object in repository ${repositoryPath}, but Git reported "${objectType || "empty output"}".`,
+    );
+  }
+
+  return {
+    hash: value as VerifiedGitCommitHash,
+    ...(objectTypeResult.warning ? { warning: objectTypeResult.warning } : {}),
   };
 }
 
@@ -202,7 +230,7 @@ function resolveCommitRef(
     );
   }
 
-  return commit;
+  return commit as VerifiedGitCommitHash;
 }
 
 export function discoverGitChangedFiles(
@@ -336,33 +364,55 @@ export function loadGitPairContent(
   options: LoadGitPairContentOptions,
   runner: GitCommandRunner = runGitCommand,
 ): GitPairContentResult {
-  const baseRef = requireVerifiedGitCommitHash(options.baseRef, "base");
-  const headRef = requireVerifiedGitCommitHash(options.headRef, "head");
+  const baseHash = requireFullGitCommitHash(options.baseRef, "base");
+  const headHash = requireFullGitCommitHash(options.headRef, "head");
+  const baseVerification = verifyGitCommitHashInRepository(
+    runner,
+    options.repositoryPath,
+    baseHash,
+    "base",
+  );
+  const headVerification = verifyGitCommitHashInRepository(
+    runner,
+    options.repositoryPath,
+    headHash,
+    "head",
+  );
+  const warnings = [
+    baseVerification.warning
+      ? `Verifying base commit ${baseVerification.hash} produced stderr: ${baseVerification.warning}`
+      : undefined,
+    headVerification.warning
+      ? `Verifying head commit ${headVerification.hash} produced stderr: ${headVerification.warning}`
+      : undefined,
+  ].filter((warning): warning is string => Boolean(warning));
   const before = loadGitContentSide(
     runner,
     options.repositoryPath,
-    baseRef,
+    baseVerification.hash,
     options.pair.beforePath,
     "before",
   );
   const after = loadGitContentSide(
     runner,
     options.repositoryPath,
-    headRef,
+    headVerification.hash,
     options.pair.afterPath,
     "after",
   );
   const failures = [before.failure, after.failure].filter(
     (failure): failure is GitContentLoadFailure => Boolean(failure),
   );
-  const warnings = [
-    before.warning
-      ? `Reading before content for ${options.pair.beforePath} produced stderr: ${before.warning}`
-      : undefined,
-    after.warning
-      ? `Reading after content for ${options.pair.afterPath} produced stderr: ${after.warning}`
-      : undefined,
-  ].filter((warning): warning is string => Boolean(warning));
+  warnings.push(
+    ...[
+      before.warning
+        ? `Reading before content for ${options.pair.beforePath} produced stderr: ${before.warning}`
+        : undefined,
+      after.warning
+        ? `Reading after content for ${options.pair.afterPath} produced stderr: ${after.warning}`
+        : undefined,
+    ].filter((warning): warning is string => Boolean(warning)),
+  );
 
   return {
     pair: options.pair,

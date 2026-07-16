@@ -28,12 +28,26 @@ function comparisonRunner(
   diffOutput: string,
   contentResults: GitCommandResult[] = [],
 ): GitCommandRunner {
+  assert.equal(
+    contentResults.length % 2,
+    0,
+    "Content results must provide before/after Git show results for each pair.",
+  );
+  const verifiedContentResults: GitCommandResult[] = [];
+  for (let index = 0; index < contentResults.length; index += 2) {
+    verifiedContentResults.push(
+      commandResult(0, "commit\n"),
+      commandResult(0, "commit\n"),
+      contentResults[index],
+      contentResults[index + 1],
+    );
+  }
   const results = [
     commandResult(0, "true\n"),
     commandResult(0, `${baseCommit}\n`),
     commandResult(0, `${headCommit}\n`),
     commandResult(0, diffOutput),
-    ...contentResults,
+    ...verifiedContentResults,
   ];
 
   return (args) => {
