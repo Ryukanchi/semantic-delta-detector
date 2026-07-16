@@ -8,6 +8,11 @@ export {
 export { formatPrComment } from "./output/formatPrComment.js";
 
 export {
+  formatGitComparisonPrComment,
+  formatGitComparisonReport,
+} from "./output/formatGitComparison.js";
+
+export {
   gitDiffFilesToCandidates,
   parseGitDiffNameStatus,
 } from "./gitDiffParser.js";
@@ -17,6 +22,8 @@ export {
   GitDiscoveryError,
   loadGitPairContent,
 } from "./gitDiscovery.js";
+
+export { compareGitChanges } from "./gitComparison.js";
 
 export type {
   ConfidenceLevel,
@@ -45,3 +52,12 @@ export type {
   GitPairContentResult,
   LoadGitPairContentOptions,
 } from "./gitDiscovery.js";
+
+export type {
+  CompareGitChangesOptions,
+  GitAnalyzedFile,
+  GitComparisonResult,
+  GitComparisonSkippedFile,
+  GitComparisonSkipStage,
+  GitComparisonSummary,
+} from "./gitComparison.js";
