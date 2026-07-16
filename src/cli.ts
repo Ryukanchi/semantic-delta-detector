@@ -11,6 +11,11 @@ import {
 } from "./ciGating.js";
 import { loadSemanticDeltaConfig, SemanticDeltaConfig } from "./config.js";
 import { exampleQueryPairs } from "./examples/queryPairs.js";
+import { compareGitChanges } from "./gitComparison.js";
+import {
+  formatGitComparisonPrComment,
+  formatGitComparisonReport,
+} from "./output/formatGitComparison.js";
 import { formatPrComment } from "./output/formatPrComment.js";
 import { formatDemoReport, formatReadableReport } from "./output/formatReport.js";
 import { MetricDefinitionInput } from "./types.js";
@@ -25,6 +30,9 @@ interface CliOptions {
   jsonA?: string;
   jsonB?: string;
   example?: string;
+  changedFrom?: string;
+  changedTo?: string;
+  repositoryPath?: string;
   failOn?: SeverityThreshold;
   format: "json" | "text";
   demo: boolean;
@@ -39,6 +47,7 @@ Usage:
   pnpm compare --file-a ./query-a.sql --file-b ./query-b.sql
   pnpm compare --before ./examples/before.sql --after ./examples/after.sql --pr
   pnpm compare --example login-vs-paid
+  pnpm compare --changed-from origin/main --changed-to HEAD --repo .
 
 Options:
   --query-a     Inline SQL query A
@@ -50,12 +59,23 @@ Options:
   --json-a      Path to JSON metric definition A
   --json-b      Path to JSON metric definition B
   --example     Run a bundled example
+  --changed-from  Base Git ref for local changed-file comparison (required for Git mode)
+  --changed-to    Head Git ref for local changed-file comparison (default: HEAD)
+  --repo          Git repository path (default: current directory)
   --demo        Show high-impact demo output
-  --pr          Show a short GitHub PR-style comment
+  --pr          Show a short simulated PR-style comment; nothing is posted
   --fail-on     Fail with exit code 1 when result risk is at or above low | medium | high | critical
   --format      json | text (default: text)
   --help        Show this message
 `);
+}
+
+function requireOptionValue(token: string, next: string | undefined): string {
+  if (!next || next.startsWith("--")) {
+    throw new Error(`Missing value for ${token}.`);
+  }
+
+  return next;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -67,19 +87,19 @@ function parseArgs(argv: string[]): CliOptions {
 
     switch (token) {
       case "--query-a":
-        options.queryA = next;
+        options.queryA = requireOptionValue(token, next);
         index += 1;
         break;
       case "--query-b":
-        options.queryB = next;
+        options.queryB = requireOptionValue(token, next);
         index += 1;
         break;
       case "--file-a":
-        options.fileA = next;
+        options.fileA = requireOptionValue(token, next);
         index += 1;
         break;
       case "--file-b":
-        options.fileB = next;
+        options.fileB = requireOptionValue(token, next);
         index += 1;
         break;
       case "--before":
@@ -97,21 +117,34 @@ function parseArgs(argv: string[]): CliOptions {
         index += 1;
         break;
       case "--json-a":
-        options.jsonA = next;
+        options.jsonA = requireOptionValue(token, next);
         index += 1;
         break;
       case "--json-b":
-        options.jsonB = next;
+        options.jsonB = requireOptionValue(token, next);
         index += 1;
         break;
       case "--example":
-        options.example = next;
+        options.example = requireOptionValue(token, next);
+        index += 1;
+        break;
+      case "--changed-from":
+        options.changedFrom = requireOptionValue(token, next);
+        index += 1;
+        break;
+      case "--changed-to":
+        options.changedTo = requireOptionValue(token, next);
+        index += 1;
+        break;
+      case "--repo":
+        options.repositoryPath = requireOptionValue(token, next);
         index += 1;
         break;
       case "--format":
-        if (next === "json" || next === "text") {
-          options.format = next;
+        if (next !== "json" && next !== "text") {
+          throw new Error('Invalid --format value. Supported values: "json" and "text".');
         }
+        options.format = next;
         index += 1;
         break;
       case "--demo":
@@ -137,6 +170,56 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   return options;
+}
+
+type CliMode = "single" | "git";
+
+function resolveCliMode(options: CliOptions): CliMode {
+  const gitRequested = Boolean(
+    options.changedFrom || options.changedTo || options.repositoryPath,
+  );
+  const directPairRequested = Boolean(
+    options.queryA ||
+      options.queryB ||
+      options.fileA ||
+      options.fileB ||
+      options.jsonA ||
+      options.jsonB,
+  );
+  const beforeAfterRequested = Boolean(options.beforeFile || options.afterFile);
+  const nonGitInputRequested = Boolean(
+    options.example || directPairRequested || beforeAfterRequested,
+  );
+
+  if (gitRequested) {
+    if (!options.changedFrom) {
+      throw new Error("Git comparison mode requires --changed-from <baseRef>.");
+    }
+
+    if (nonGitInputRequested) {
+      throw new Error(
+        "Git comparison mode cannot be combined with --example, --before/--after, or direct query/file/JSON inputs.",
+      );
+    }
+
+    if (options.demo) {
+      throw new Error("Git comparison mode does not support --demo. Use text, --pr, or --format json.");
+    }
+
+    return "git";
+  }
+
+  if (options.example && (directPairRequested || beforeAfterRequested)) {
+    throw new Error("--example cannot be combined with explicit query or file inputs.");
+  }
+
+  if (directPairRequested && beforeAfterRequested) {
+    throw new Error(
+      "--before/--after cannot be combined with direct query, file, or JSON inputs.",
+    );
+  }
+
+  return "single";
 }
 
 function readSqlFromFile(filePath: string, label = "SQL"): string {
@@ -247,8 +330,38 @@ function resolveInputs(
 function main(): void {
   try {
     const options = parseArgs(process.argv.slice(2));
-    const config = loadSemanticDeltaConfig();
+    const mode = resolveCliMode(options);
+    const repositoryPath = resolve(process.cwd(), options.repositoryPath ?? ".");
+    const config = loadSemanticDeltaConfig(mode === "git" ? repositoryPath : process.cwd());
     const failOn = options.failOn ?? config.failOn;
+
+    if (mode === "git") {
+      const result = compareGitChanges({
+        repositoryPath,
+        baseRef: options.changedFrom as string,
+        headRef: options.changedTo ?? "HEAD",
+        include: config.include,
+        ignore: config.ignore,
+      });
+
+      if (options.format === "json") {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (options.pr) {
+        console.log(formatGitComparisonPrComment(result));
+      } else {
+        console.log(formatGitComparisonReport(result));
+      }
+
+      if (
+        failOn &&
+        result.summary.analyzedCount > 0 &&
+        shouldFailForRisk(result.summary.highestSeverity, failOn)
+      ) {
+        process.exitCode = 1;
+      }
+      return;
+    }
+
     const { inputA, inputB } = resolveInputs(options, config);
     const result = compareMetricDefinitions(inputA, inputB);
 
