@@ -67,8 +67,7 @@ export function compareGitChangesWithRunner(
     ...mapPathFilteredSkips(discovery.candidates, composition.pathFiltering.skipped),
     ...composition.pairing.skipped.map((item) => ({
       stage: "pairing" as const,
-      path: item.path,
-      reason: item.reason,
+      ...item,
     })),
   ];
   const analyzed: GitAnalyzedFile[] = [];

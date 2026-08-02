@@ -53,6 +53,174 @@ function mapStatus(rawStatus: string): GitDiffFileStatus {
   return "unknown";
 }
 
+interface NulField {
+  bytes: Buffer;
+  terminated: boolean;
+  nextOffset: number;
+}
+
+function readNulField(output: Buffer, offset: number): NulField | undefined {
+  if (offset >= output.length) {
+    return undefined;
+  }
+
+  const terminatorOffset = output.indexOf(0, offset);
+  if (terminatorOffset === -1) {
+    return {
+      bytes: output.subarray(offset),
+      terminated: false,
+      nextOffset: output.length,
+    };
+  }
+
+  return {
+    bytes: output.subarray(offset, terminatorOffset),
+    terminated: true,
+    nextOffset: terminatorOffset + 1,
+  };
+}
+
+function decodeNulField(field: Buffer): string | undefined {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(field);
+  } catch {
+    return undefined;
+  }
+}
+
+function formatNulFields(fields: Buffer[]): string {
+  return fields
+    .map((field) => {
+      const decoded = decodeNulField(field);
+      return decoded === undefined ? `0x${field.toString("hex")}` : JSON.stringify(decoded);
+    })
+    .join(" NUL ");
+}
+
+function skipNulRecord(
+  result: GitDiffNameStatusParseResult,
+  fields: Buffer[],
+  reason: string,
+): void {
+  skipLine(result, formatNulFields(fields), reason);
+}
+
+/**
+ * Parses `git diff --name-status -z` output without first converting the full
+ * byte stream to text. This is intentionally not re-exported from the package
+ * entry point; Git discovery owns the byte-oriented subprocess boundary.
+ */
+export function parseGitDiffNameStatusZ(
+  output: Buffer,
+): GitDiffNameStatusParseResult {
+  const result: GitDiffNameStatusParseResult = {
+    files: [],
+    skipped: [],
+  };
+  let offset = 0;
+
+  while (offset < output.length) {
+    const statusField = readNulField(output, offset);
+    if (!statusField) {
+      break;
+    }
+    offset = statusField.nextOffset;
+    const recordFields = [statusField.bytes];
+
+    if (!statusField.terminated) {
+      skipNulRecord(result, recordFields, "file status field is not NUL-terminated");
+      break;
+    }
+
+    const rawStatus = decodeNulField(statusField.bytes);
+    if (rawStatus === undefined) {
+      skipNulRecord(result, recordFields, "file status field is not valid UTF-8");
+      continue;
+    }
+    if (!rawStatus) {
+      skipNulRecord(result, recordFields, "missing file status");
+      continue;
+    }
+
+    const pathFieldCount =
+      rawStatus.startsWith("R") || rawStatus.startsWith("C") ? 2 : 1;
+    const pathFields: NulField[] = [];
+    let incompleteReason: string | undefined;
+
+    for (let pathIndex = 0; pathIndex < pathFieldCount; pathIndex += 1) {
+      const pathField = readNulField(output, offset);
+      if (!pathField) {
+        incompleteReason =
+          pathFieldCount === 2
+            ? `${rawStatus} entry requires before and after paths`
+            : `${rawStatus} entry requires exactly one path`;
+        break;
+      }
+
+      pathFields.push(pathField);
+      recordFields.push(pathField.bytes);
+      offset = pathField.nextOffset;
+      if (!pathField.terminated) {
+        incompleteReason = `path field ${pathIndex + 1} is not NUL-terminated`;
+        break;
+      }
+    }
+
+    if (incompleteReason) {
+      skipNulRecord(result, recordFields, incompleteReason);
+      continue;
+    }
+
+    const decodedPaths = pathFields.map((field) => decodeNulField(field.bytes));
+    const invalidPathIndex = decodedPaths.findIndex((path) => path === undefined);
+    if (invalidPathIndex !== -1) {
+      skipNulRecord(
+        result,
+        recordFields,
+        `path field ${invalidPathIndex + 1} is not valid UTF-8`,
+      );
+      continue;
+    }
+
+    const paths = decodedPaths as string[];
+    const emptyPathIndex = paths.findIndex((path) => path.length === 0);
+    if (emptyPathIndex !== -1) {
+      skipNulRecord(result, recordFields, `path field ${emptyPathIndex + 1} is empty`);
+      continue;
+    }
+
+    if (rawStatus.startsWith("R")) {
+      result.files.push({
+        status: "renamed",
+        path: paths[1],
+        beforePath: paths[0],
+        afterPath: paths[1],
+        rawStatus,
+      });
+      continue;
+    }
+
+    if (rawStatus.startsWith("C")) {
+      result.files.push({
+        status: "unknown",
+        path: paths[1],
+        beforePath: paths[0],
+        afterPath: paths[1],
+        rawStatus,
+      });
+      continue;
+    }
+
+    result.files.push({
+      status: mapStatus(rawStatus),
+      path: paths[0],
+      rawStatus,
+    });
+  }
+
+  return result;
+}
+
 export function parseGitDiffNameStatus(output: string): GitDiffNameStatusParseResult {
   const result: GitDiffNameStatusParseResult = {
     files: [],
@@ -157,6 +325,12 @@ export function gitDiffFilesToCandidates(files: GitDiffChangedFile[]): Candidate
     return {
       path: file.path,
       status: "unknown",
+      ...(file.rawStatus.startsWith("C") && file.beforePath !== undefined
+        ? { beforePath: file.beforePath }
+        : {}),
+      ...(file.rawStatus.startsWith("C") && file.afterPath !== undefined
+        ? { afterPath: file.afterPath }
+        : {}),
       hasBefore: false,
       hasAfter: false,
     };

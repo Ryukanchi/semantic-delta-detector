@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import type { CandidateFile, CandidatePair } from "../candidatePairing.js";
 import {
   gitDiffFilesToCandidates,
-  parseGitDiffNameStatus,
+  parseGitDiffNameStatusZ,
 } from "../gitDiffParser.js";
 import { GitDiscoveryError } from "../gitDiscoveryError.js";
 import type {
@@ -226,6 +226,7 @@ export function discoverGitChangedFilesWithRunner(
       repositoryPath,
       "diff",
       "--name-status",
+      "-z",
       "--find-renames",
       resolvedBaseRef,
       resolvedHeadRef,
@@ -237,7 +238,7 @@ export function discoverGitChangedFilesWithRunner(
     warnings.push(`Git diff produced stderr: ${diffResult.warning}`);
   }
 
-  const parsed = parseGitDiffNameStatus(decodeUtf8(diffResult.stdout, "Git diff output"));
+  const parsed = parseGitDiffNameStatusZ(diffResult.stdout);
 
   return {
     repositoryPath,

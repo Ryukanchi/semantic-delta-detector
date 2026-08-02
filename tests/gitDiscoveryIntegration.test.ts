@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  compareGitChanges,
   discoverGitChangedFiles,
   GitDiscoveryError,
   loadGitPairContent,
@@ -203,3 +204,134 @@ test("discovers and reads real modified, added, deleted, and renamed Git files",
     rmSync(repositoryPath, { recursive: true, force: true });
   }
 });
+
+test(
+  "round-trips special Git paths through discovery, filtering, pairing, and content loading",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Windows does not support every filename character in this POSIX path matrix"
+        : false,
+  },
+  () => {
+    const gitVersion = spawnSync("git", ["--version"], {
+      encoding: "utf8",
+      shell: false,
+    });
+    assert.equal(
+      gitVersion.status,
+      0,
+      `Git is required for this integration test: ${gitVersion.stderr || gitVersion.error?.message}`,
+    );
+
+    const repositoryPath = mkdtempSync(join(tmpdir(), "semantic-delta-special-paths-"));
+    const modifiedPaths = [
+      "models/ordinary.sql",
+      "models/ユニコード.sql",
+      "models/space name.sql",
+      "models/tab\tname.sql",
+      "models/line\nname.sql",
+      'models/quote"name.sql',
+      "models/backslash\\name.sql",
+      "models/深い directory/metric.sql",
+    ];
+    const renamedBefore = 'models/old\t"\\名.sql';
+    const renamedAfter = 'models/new\n"\\名.sql';
+
+    try {
+      runGit(repositoryPath, ["init"]);
+      runGit(repositoryPath, ["config", "user.name", "Semantic Delta Test"]);
+      runGit(repositoryPath, ["config", "user.email", "semantic-delta@example.test"]);
+
+      for (const [index, path] of modifiedPaths.entries()) {
+        writeRepositoryFile(
+          repositoryPath,
+          path,
+          `SELECT COUNT(*) FROM source_${index}\n`,
+        );
+      }
+      writeRepositoryFile(
+        repositoryPath,
+        renamedBefore,
+        "SELECT COUNT(DISTINCT rename_id) FROM rename_source WHERE status = 'stable'\n",
+      );
+      runGit(repositoryPath, ["add", "--", "."]);
+      runGit(repositoryPath, ["commit", "-m", "add special paths"]);
+      const baseRef = runGit(repositoryPath, ["rev-parse", "HEAD"]);
+
+      for (const [index, path] of modifiedPaths.entries()) {
+        writeRepositoryFile(
+          repositoryPath,
+          path,
+          `SELECT COUNT(*) FROM source_${index} WHERE active = true\n`,
+        );
+      }
+      renameSync(join(repositoryPath, renamedBefore), join(repositoryPath, renamedAfter));
+      runGit(repositoryPath, ["add", "--", "."]);
+      runGit(repositoryPath, ["commit", "-m", "change special paths"]);
+
+      runGit(repositoryPath, ["config", "core.quotePath", "true"]);
+      const quotedDiscovery = discoverGitChangedFiles({
+        repositoryPath,
+        baseRef,
+        headRef: "HEAD",
+      });
+      runGit(repositoryPath, ["config", "core.quotePath", "false"]);
+      const unquotedDiscovery = discoverGitChangedFiles({
+        repositoryPath,
+        baseRef,
+        headRef: "HEAD",
+      });
+
+      assert.deepEqual(unquotedDiscovery.files, quotedDiscovery.files);
+      assert.deepEqual(unquotedDiscovery.parserSkipped, []);
+      assert.equal(unquotedDiscovery.files.length, modifiedPaths.length + 1);
+      for (const path of modifiedPaths) {
+        const file = unquotedDiscovery.files.find((candidate) => candidate.path === path);
+        assert.ok(file, `Missing exact discovered path ${JSON.stringify(path)}`);
+        assert.equal(file.status, "modified");
+      }
+      assert.deepEqual(
+        unquotedDiscovery.files.find((file) => file.status === "renamed"),
+        {
+          status: "renamed",
+          path: renamedAfter,
+          beforePath: renamedBefore,
+          afterPath: renamedAfter,
+          rawStatus: "R100",
+        },
+      );
+
+      const comparison = compareGitChanges({
+        repositoryPath,
+        baseRef,
+        headRef: "HEAD",
+      });
+      assert.equal(comparison.summary.discoveredCount, modifiedPaths.length + 1);
+      assert.equal(comparison.summary.analyzedCount, modifiedPaths.length + 1);
+      assert.equal(comparison.summary.skippedCount, 0);
+      assert.equal(
+        comparison.summary.discoveredCount,
+        comparison.analyzed.length + comparison.skipped.length,
+      );
+      assert.ok(
+        comparison.analyzed.some(
+          (file) =>
+            file.beforePath === renamedBefore &&
+            file.afterPath === renamedAfter &&
+            file.displayPath === `${renamedBefore} -> ${renamedAfter}`,
+        ),
+      );
+      for (const path of modifiedPaths) {
+        assert.ok(
+          comparison.analyzed.some(
+            (file) => file.beforePath === path && file.afterPath === path,
+          ),
+          `Special path did not reach content loading: ${JSON.stringify(path)}`,
+        );
+      }
+    } finally {
+      rmSync(repositoryPath, { recursive: true, force: true });
+    }
+  },
+);

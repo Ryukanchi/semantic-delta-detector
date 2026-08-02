@@ -4,7 +4,15 @@ import { composeCandidateDiscovery } from "../src/discoveryComposition.js";
 import {
   gitDiffFilesToCandidates,
   parseGitDiffNameStatus,
+  parseGitDiffNameStatusZ,
 } from "../src/gitDiffParser.js";
+
+function nameStatusZ(records: ReadonlyArray<readonly string[]>): Buffer {
+  const fields = records.flat();
+  return fields.length === 0
+    ? Buffer.alloc(0)
+    : Buffer.from(`${fields.join("\0")}\0`, "utf8");
+}
 
 test("parses a modified file", () => {
   const result = parseGitDiffNameStatus("M\tmodels/revenue.sql");
@@ -225,4 +233,158 @@ test("preserves Windows-style paths without normalizing them", () => {
   const result = parseGitDiffNameStatus("M\tmodels\\finance\\revenue.sql");
 
   assert.equal(result.files[0].path, "models\\finance\\revenue.sql");
+});
+
+test("parses NUL-delimited ordinary and special paths without splitting them", () => {
+  const paths = [
+    "models/ordinary.sql",
+    "models/ユニコード.sql",
+    "models/space name.sql",
+    "models/tab\tname.sql",
+    "models/line\nname.sql",
+    'models/quote"name.sql',
+    "models/backslash\\name.sql",
+    "models/深い directory/metric.sql",
+  ];
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ(paths.map((path) => ["M", path])),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    paths,
+  );
+  assert.ok(result.files.every((file) => file.status === "modified"));
+  assert.deepEqual(result.skipped, []);
+});
+
+test("parses NUL-delimited added, deleted, and unknown statuses conservatively", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["A", "models/added.sql"],
+      ["D", "models/deleted.sql"],
+      ["T", "models/type-changed.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => [file.status, file.path, file.rawStatus]),
+    [
+      ["added", "models/added.sql", "A"],
+      ["deleted", "models/deleted.sql", "D"],
+      ["unknown", "models/type-changed.sql", "T"],
+    ],
+  );
+  assert.deepEqual(result.skipped, []);
+});
+
+test("preserves exact NUL-delimited rename and copy paths", () => {
+  const renamedBefore = 'models/old\t"\\名.sql';
+  const renamedAfter = 'models/new\n"\\名.sql';
+  const copiedBefore = "models/source ユニコード.sql";
+  const copiedAfter = "models/copy\tname.sql";
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["R087", renamedBefore, renamedAfter],
+      ["C100", copiedBefore, copiedAfter],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "renamed",
+      path: renamedAfter,
+      beforePath: renamedBefore,
+      afterPath: renamedAfter,
+      rawStatus: "R087",
+    },
+    {
+      status: "unknown",
+      path: copiedAfter,
+      beforePath: copiedBefore,
+      afterPath: copiedAfter,
+      rawStatus: "C100",
+    },
+  ]);
+  assert.deepEqual(gitDiffFilesToCandidates(result.files)[1], {
+    path: copiedAfter,
+    status: "unknown",
+    beforePath: copiedBefore,
+    afterPath: copiedAfter,
+    hasBefore: false,
+    hasAfter: false,
+  });
+});
+
+test("preserves NUL-delimited duplicate records and ordering", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["M", "models/second.sql"],
+      ["M", "models/duplicate.sql"],
+      ["M", "models/first.sql"],
+      ["M", "models/duplicate.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    [
+      "models/second.sql",
+      "models/duplicate.sql",
+      "models/first.sql",
+      "models/duplicate.sql",
+    ],
+  );
+});
+
+test("keeps malformed, truncated, and empty NUL records observable", () => {
+  const result = parseGitDiffNameStatusZ(
+    Buffer.concat([
+      nameStatusZ([
+        ["M", "models/valid.sql"],
+        ["M", ""],
+      ]),
+      Buffer.from("R100\0models/old.sql\0", "utf8"),
+    ]),
+  );
+
+  assert.deepEqual(result.files.map((file) => file.path), ["models/valid.sql"]);
+  assert.equal(result.skipped.length, 2);
+  assert.match(result.skipped[0].reason, /path field 1 is empty/i);
+  assert.match(result.skipped[1].reason, /before and after paths/i);
+
+  const unterminated = parseGitDiffNameStatusZ(
+    Buffer.from("M\0models/unterminated.sql", "utf8"),
+  );
+  assert.deepEqual(unterminated.files, []);
+  assert.equal(unterminated.skipped.length, 1);
+  assert.match(unterminated.skipped[0].reason, /not NUL-terminated/i);
+});
+
+test("skips invalid UTF-8 paths without manufacturing replacement text", () => {
+  const invalidPath = Buffer.from([0xc3, 0x28]);
+  const result = parseGitDiffNameStatusZ(
+    Buffer.concat([
+      Buffer.from("M\0", "utf8"),
+      invalidPath,
+      Buffer.from([0]),
+      nameStatusZ([["M", "models/after-invalid.sql"]]),
+    ]),
+  );
+
+  assert.deepEqual(result.files.map((file) => file.path), ["models/after-invalid.sql"]);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /not valid UTF-8/i);
+  assert.match(result.skipped[0].line, /0xc328/);
+  assert.doesNotMatch(result.skipped[0].line, /�/);
+});
+
+test("keeps the public legacy text parser behavior unchanged", () => {
+  const result = parseGitDiffNameStatus(
+    'M\t"models/quoted\\303\\274.sql"\nC100\tmodels/source.sql\tmodels/copy.sql',
+  );
+
+  assert.equal(result.files[0].path, '"models/quoted\\303\\274.sql"');
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /exactly one path/i);
 });

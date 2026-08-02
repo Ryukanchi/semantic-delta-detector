@@ -208,6 +208,32 @@ test("candidate pairing skips unknown statuses", () => {
   );
 });
 
+test("candidate pairing preserves exact two-path metadata for conservative skips", () => {
+  assert.deepEqual(
+    createCandidatePairs([
+      {
+        path: "models/copied.sql",
+        status: "unknown",
+        beforePath: "models/source\t名.sql",
+        afterPath: "models/copied\n名.sql",
+        hasBefore: false,
+        hasAfter: false,
+      },
+    ]),
+    {
+      pairs: [],
+      skipped: [
+        {
+          path: "models/copied.sql",
+          beforePath: "models/source\t名.sql",
+          afterPath: "models/copied\n名.sql",
+          reason: "skipped because candidate status is unknown",
+        },
+      ],
+    },
+  );
+});
+
 test("candidate pairing preserves input order within pairs and skipped groups", () => {
   const result = createCandidatePairs([
     {
