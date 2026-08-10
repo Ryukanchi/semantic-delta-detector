@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { composeCandidateDiscovery } from "../src/discoveryComposition.js";
 import {
+  GitDiffNulParseError,
   gitDiffFilesToCandidates,
   parseGitDiffNameStatus,
   parseGitDiffNameStatusZ,
@@ -337,28 +338,195 @@ test("preserves NUL-delimited duplicate records and ordering", () => {
   );
 });
 
-test("keeps malformed, truncated, and empty NUL records observable", () => {
+test("keeps explicit empty NUL fields observable and preserves later records", () => {
   const result = parseGitDiffNameStatusZ(
-    Buffer.concat([
-      nameStatusZ([
-        ["M", "models/valid.sql"],
-        ["M", ""],
-      ]),
-      Buffer.from("R100\0models/old.sql\0", "utf8"),
+    nameStatusZ([
+      ["M", "models/valid.sql"],
+      ["R100", "models/old.sql", ""],
+      ["M", "models/after-empty.sql"],
     ]),
   );
 
-  assert.deepEqual(result.files.map((file) => file.path), ["models/valid.sql"]);
-  assert.equal(result.skipped.length, 2);
-  assert.match(result.skipped[0].reason, /path field 1 is empty/i);
-  assert.match(result.skipped[1].reason, /before and after paths/i);
-
-  const unterminated = parseGitDiffNameStatusZ(
-    Buffer.from("M\0models/unterminated.sql", "utf8"),
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    ["models/valid.sql", "models/after-empty.sql"],
   );
-  assert.deepEqual(unterminated.files, []);
-  assert.equal(unterminated.skipped.length, 1);
-  assert.match(unterminated.skipped[0].reason, /not NUL-terminated/i);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /path field 2 is empty/i);
+});
+
+test("keeps an explicit empty copy field from consuming the next status", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["C100", "models/source.sql", ""],
+      ["A", "models/after-empty.sql"],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "added",
+      path: "models/after-empty.sql",
+      rawStatus: "A",
+    },
+  ]);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /path field 2 is empty/i);
+});
+
+test("fails closed on missing terminal NUL and truncated EOF", () => {
+  assert.throws(
+    () => parseGitDiffNameStatusZ(Buffer.from("M\0models/unterminated.sql", "utf8")),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /without a terminal NUL/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+
+  assert.throws(
+    () =>
+      parseGitDiffNameStatusZ(
+        Buffer.from("M\0models/valid.sql\0R100\0models/old.sql\0", "utf8"),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /no safe complete record framing/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+});
+
+const recoverableLaterRecords = [
+  {
+    name: "modified",
+    fields: ["M", "models/good.sql"],
+    expected: {
+      status: "modified",
+      path: "models/good.sql",
+      rawStatus: "M",
+    },
+  },
+  {
+    name: "added",
+    fields: ["A", "models/good.sql"],
+    expected: {
+      status: "added",
+      path: "models/good.sql",
+      rawStatus: "A",
+    },
+  },
+  {
+    name: "deleted",
+    fields: ["D", "models/good.sql"],
+    expected: {
+      status: "deleted",
+      path: "models/good.sql",
+      rawStatus: "D",
+    },
+  },
+  {
+    name: "unknown",
+    fields: ["T", "models/good.sql"],
+    expected: {
+      status: "unknown",
+      path: "models/good.sql",
+      rawStatus: "T",
+    },
+  },
+  {
+    name: "rename",
+    fields: ["R100", "models/later-old.sql", "models/later-new.sql"],
+    expected: {
+      status: "renamed",
+      path: "models/later-new.sql",
+      beforePath: "models/later-old.sql",
+      afterPath: "models/later-new.sql",
+      rawStatus: "R100",
+    },
+  },
+] as const;
+
+for (const malformedStatus of ["R100", "C100"] as const) {
+  for (const laterRecord of recoverableLaterRecords) {
+    test(`recovers the later ${laterRecord.name} record after truncated ${malformedStatus}`, () => {
+      const result = parseGitDiffNameStatusZ(
+        nameStatusZ([
+          [malformedStatus, "models/incomplete.sql"],
+          laterRecord.fields,
+        ]),
+      );
+
+      assert.deepEqual(result.files, [laterRecord.expected]);
+      assert.equal(result.skipped.length, 1);
+      assert.match(result.skipped[0].reason, /entry is truncated/i);
+      assert.match(result.skipped[0].reason, /only 1 could be assigned/i);
+      assert.equal(
+        result.skipped[0].line,
+        `${JSON.stringify(malformedStatus)} NUL "models/incomplete.sql"`,
+      );
+    });
+  }
+}
+
+test("fails closed instead of choosing between ambiguous complete framings", () => {
+  assert.throws(
+    () =>
+      parseGitDiffNameStatusZ(
+        nameStatusZ([
+          ["R100", "models/old.sql", "M"],
+          ["A", "R100"],
+          ["D", "models/path.sql"],
+        ]),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /ambiguous record boundaries/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+});
+
+test("fails closed on invalid or empty status fields", () => {
+  const invalidStatus = Buffer.concat([
+    Buffer.from([0xff, 0]),
+    Buffer.from("models/bad.sql\0M\0models/good.sql\0", "utf8"),
+  ]);
+  assert.throws(
+    () => parseGitDiffNameStatusZ(invalidStatus),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /no safe complete record framing/i.test(error.message),
+  );
+  assert.throws(
+    () =>
+      parseGitDiffNameStatusZ(
+        Buffer.from("\0models/bad.sql\0M\0models/good.sql\0", "utf8"),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /no safe complete record framing/i.test(error.message),
+  );
+});
+
+test("skips invalid UTF-8 rename and copy fields while preserving the next record", () => {
+  for (const malformedStatus of ["R100", "C100"] as const) {
+    const result = parseGitDiffNameStatusZ(
+      Buffer.concat([
+        Buffer.from(`${malformedStatus}\0models/old.sql\0`, "utf8"),
+        Buffer.from([0xc3, 0x28, 0]),
+        nameStatusZ([["M", "models/after-invalid.sql"]]),
+      ]),
+    );
+
+    assert.deepEqual(result.files, [
+      {
+        status: "modified",
+        path: "models/after-invalid.sql",
+        rawStatus: "M",
+      },
+    ]);
+    assert.equal(result.skipped.length, 1);
+    assert.match(result.skipped[0].reason, /path field 2 is not valid UTF-8/i);
+    assert.match(result.skipped[0].line, /0xc328/);
+  }
 });
 
 test("skips invalid UTF-8 paths without manufacturing replacement text", () => {

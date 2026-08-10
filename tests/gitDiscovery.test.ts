@@ -62,7 +62,7 @@ test("discovers changed files with argument-array Git commands", () => {
           ["A", "models/new.sql"],
           ["R100", "models/old.sql", "models/renamed.sql"],
           ["T", "models/type-change.sql"],
-          ["malformed", ""],
+          ["M", ""],
         ]),
       ),
     ],
@@ -190,6 +190,86 @@ test("keeps invalid UTF-8 discovery paths out of candidates", () => {
   assert.equal(result.parserSkipped.length, 1);
   assert.match(result.parserSkipped[0].reason, /not valid UTF-8/i);
   assert.match(result.parserSkipped[0].line, /0xc328/);
+});
+
+test("keeps a later valid discovery record after a truncated rename", () => {
+  const result = discoverGitChangedFiles(
+    {
+      repositoryPath: process.cwd(),
+      baseRef: "BASE",
+      headRef: "HEAD",
+    },
+    queuedRunner(
+      [
+        commandResult(0, "true\n"),
+        commandResult(0, `${baseCommit}\n`),
+        commandResult(0, `${headCommit}\n`),
+        commandResult(
+          0,
+          nameStatusZ([
+            ["R100", "models/incomplete.sql"],
+            ["M", "models/good.sql"],
+          ]),
+        ),
+      ],
+      [],
+    ),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "modified",
+      path: "models/good.sql",
+      rawStatus: "M",
+    },
+  ]);
+  assert.deepEqual(result.candidates, [
+    {
+      path: "models/good.sql",
+      status: "modified",
+      hasBefore: true,
+      hasAfter: true,
+    },
+  ]);
+  assert.equal(result.parserSkipped.length, 1);
+  assert.match(result.parserSkipped[0].reason, /R100 entry is truncated/i);
+});
+
+test("surfaces ambiguous NUL framing as an operational discovery error", () => {
+  const calls: string[][] = [];
+  assert.throws(
+    () =>
+      discoverGitChangedFiles(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: "BASE",
+          headRef: "HEAD",
+        },
+        queuedRunner(
+          [
+            commandResult(0, "true\n"),
+            commandResult(0, `${baseCommit}\n`),
+            commandResult(0, `${headCommit}\n`),
+            commandResult(
+              0,
+              nameStatusZ([
+                ["R100", "models/old.sql", "M"],
+                ["A", "R100"],
+                ["D", "models/path.sql"],
+              ]),
+            ),
+          ],
+          calls,
+        ),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiscoveryError &&
+      /Could not safely parse Git diff output/.test(error.message) &&
+      /ambiguous record boundaries/.test(error.message) &&
+      /no records were accepted/.test(error.message),
+  );
+  assert.equal(calls.length, 4);
+  assert.equal(calls.some((args) => args[2] === "show"), false);
 });
 
 test("surfaces successful Git stderr as warnings", () => {

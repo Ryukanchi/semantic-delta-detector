@@ -104,7 +104,7 @@ test("compares all valid pairs and accounts for every discovered row", () => {
       "T\tmodels/type-change.sql",
       "C100\tmodels/source.sql\tmodels/copied.sql",
       "M\tdocs/ignored.sql",
-      "malformed",
+      "M\t",
       "M\tmodels/content-fail.sql",
       "M\tmodels/low.sql",
       "M\tmodels/duplicate.sql",
@@ -207,13 +207,13 @@ test("treats only added and deleted files as transparent nonfatal skips", () => 
 });
 
 test("keeps parser-only malformed NUL output observable", () => {
-  const result = compareWithRunner("not-tab-separated");
+  const result = compareWithRunner("M\t");
 
   assert.equal(result.summary.discoveredCount, 1);
   assert.equal(result.summary.analyzedCount, 0);
   assert.equal(result.summary.skippedCount, 1);
   assert.equal(result.skipped[0].stage, "git-parse");
-  assert.match(result.skipped[0].line ?? "", /not-tab-separated/);
+  assert.match(result.skipped[0].line ?? "", /"M" NUL ""/);
 });
 
 test("uses SQL files as the safe default candidate set", () => {
@@ -358,4 +358,27 @@ test("keeps copy paths attached when another record has the same target path", (
       reason: "skipped because candidate status is unknown",
     },
   ]);
+});
+
+test("recovers a valid comparison after a truncated rename without fake accounting", () => {
+  const result = compareWithRunner(
+    nameStatusZ([
+      ["R100", "models/incomplete.sql"],
+      ["M", "models/good.sql"],
+    ]),
+    [
+      commandResult(0, "SELECT COUNT(*) FROM users"),
+      commandResult(0, "SELECT COUNT(*) FROM users"),
+    ],
+  );
+
+  assert.deepEqual(result.summary, {
+    discoveredCount: 2,
+    analyzedCount: 1,
+    skippedCount: 1,
+    highestSeverity: "low",
+  });
+  assert.deepEqual(result.analyzed.map((file) => file.path), ["models/good.sql"]);
+  assert.deepEqual(result.skipped.map((item) => item.stage), ["git-parse"]);
+  assert.match(result.skipped[0].reason, /R100 entry is truncated/i);
 });

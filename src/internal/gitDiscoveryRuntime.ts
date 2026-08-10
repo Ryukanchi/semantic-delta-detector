@@ -3,6 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { CandidateFile, CandidatePair } from "../candidatePairing.js";
 import {
+  GitDiffNulParseError,
   gitDiffFilesToCandidates,
   parseGitDiffNameStatusZ,
 } from "../gitDiffParser.js";
@@ -238,7 +239,16 @@ export function discoverGitChangedFilesWithRunner(
     warnings.push(`Git diff produced stderr: ${diffResult.warning}`);
   }
 
-  const parsed = parseGitDiffNameStatusZ(diffResult.stdout);
+  const parsed = (() => {
+    try {
+      return parseGitDiffNameStatusZ(diffResult.stdout);
+    } catch (error) {
+      if (error instanceof GitDiffNulParseError) {
+        throw new GitDiscoveryError(`Could not safely parse Git diff output: ${error.message}`);
+      }
+      throw error;
+    }
+  })();
 
   return {
     repositoryPath,
