@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import type { CandidateFile, CandidatePair } from "../candidatePairing.js";
 import {
   GitDiffNulParseError,
   gitDiffFilesToCandidates,

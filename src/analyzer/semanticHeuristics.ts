@@ -250,10 +250,6 @@ export function buildSemanticProfile(query: ParsedSqlQuery): QuerySemanticProfil
   };
 }
 
-export function inferBusinessMeaning(query: ParsedSqlQuery): string {
-  return buildSemanticProfile(query).businessMeaning;
-}
-
 export function inferDimensionFromMetadata(input: MetricDefinitionInput): BusinessDimension {
   const joined = [
     input.metric_name,
