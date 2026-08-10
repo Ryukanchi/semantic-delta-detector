@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { composeCandidateDiscovery } from "../src/discoveryComposition.js";
 import {
+  GitDiffNulParseError,
   gitDiffFilesToCandidates,
   parseGitDiffNameStatus,
+  parseGitDiffNameStatusZ,
 } from "../src/gitDiffParser.js";
+
+function nameStatusZ(records: ReadonlyArray<readonly string[]>): Buffer {
+  const fields = records.flat();
+  return fields.length === 0
+    ? Buffer.alloc(0)
+    : Buffer.from(`${fields.join("\0")}\0`, "utf8");
+}
 
 test("parses a modified file", () => {
   const result = parseGitDiffNameStatus("M\tmodels/revenue.sql");
@@ -225,4 +234,458 @@ test("preserves Windows-style paths without normalizing them", () => {
   const result = parseGitDiffNameStatus("M\tmodels\\finance\\revenue.sql");
 
   assert.equal(result.files[0].path, "models\\finance\\revenue.sql");
+});
+
+test("parses NUL-delimited ordinary and special paths without splitting them", () => {
+  const paths = [
+    "models/ordinary.sql",
+    "models/ユニコード.sql",
+    "models/space name.sql",
+    "models/tab\tname.sql",
+    "models/line\nname.sql",
+    'models/quote"name.sql',
+    "models/backslash\\name.sql",
+    "models/深い directory/metric.sql",
+  ];
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ(paths.map((path) => ["M", path])),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    paths,
+  );
+  assert.ok(result.files.every((file) => file.status === "modified"));
+  assert.deepEqual(result.skipped, []);
+});
+
+test("parses NUL-delimited added, deleted, and unknown statuses conservatively", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["A", "models/added.sql"],
+      ["D", "models/deleted.sql"],
+      ["T", "models/type-changed.sql"],
+      ["U", "models/unmerged.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => [file.status, file.path, file.rawStatus]),
+    [
+      ["added", "models/added.sql", "A"],
+      ["deleted", "models/deleted.sql", "D"],
+      ["unknown", "models/type-changed.sql", "T"],
+      ["unknown", "models/unmerged.sql", "U"],
+    ],
+  );
+  assert.deepEqual(result.skipped, []);
+});
+
+test("preserves exact NUL-delimited rename and copy paths", () => {
+  const renamedBefore = 'models/old\t"\\名.sql';
+  const renamedAfter = 'models/new\n"\\名.sql';
+  const copiedBefore = "models/source ユニコード.sql";
+  const copiedAfter = "models/copy\tname.sql";
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["R087", renamedBefore, renamedAfter],
+      ["C100", copiedBefore, copiedAfter],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "renamed",
+      path: renamedAfter,
+      beforePath: renamedBefore,
+      afterPath: renamedAfter,
+      rawStatus: "R087",
+    },
+    {
+      status: "unknown",
+      path: copiedAfter,
+      beforePath: copiedBefore,
+      afterPath: copiedAfter,
+      rawStatus: "C100",
+    },
+  ]);
+  assert.deepEqual(gitDiffFilesToCandidates(result.files)[1], {
+    path: copiedAfter,
+    status: "unknown",
+    beforePath: copiedBefore,
+    afterPath: copiedAfter,
+    hasBefore: false,
+    hasAfter: false,
+  });
+});
+
+test("preserves NUL-delimited duplicate records and ordering", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["M", "models/second.sql"],
+      ["M", "models/duplicate.sql"],
+      ["M", "models/first.sql"],
+      ["M", "models/duplicate.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    [
+      "models/second.sql",
+      "models/duplicate.sql",
+      "models/first.sql",
+      "models/duplicate.sql",
+    ],
+  );
+});
+
+test("keeps explicit empty NUL fields observable and preserves later records", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["M", "models/valid.sql"],
+      ["R100", "models/old.sql", ""],
+      ["M", "models/after-empty.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    ["models/valid.sql", "models/after-empty.sql"],
+  );
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /path field 2 is empty/i);
+});
+
+test("keeps an explicit empty copy field from consuming the next status", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["C100", "models/source.sql", ""],
+      ["A", "models/after-empty.sql"],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "added",
+      path: "models/after-empty.sql",
+      rawStatus: "A",
+    },
+  ]);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /path field 2 is empty/i);
+});
+
+test("fails closed on missing terminal NUL and truncated EOF", () => {
+  assert.throws(
+    () => parseGitDiffNameStatusZ(Buffer.from("M\0models/unterminated.sql", "utf8")),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /without a terminal NUL/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+
+  assert.throws(
+    () =>
+      parseGitDiffNameStatusZ(
+        Buffer.from("M\0models/valid.sql\0R100\0models/old.sql\0", "utf8"),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /truncated R100 entry/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+});
+
+test("treats status-shaped fields as literal paths in one-path records", () => {
+  const paths = [
+    "M",
+    "A",
+    "D",
+    "T",
+    "U",
+    "R",
+    "C",
+    "R100",
+    "R087",
+    "C100",
+    "R999",
+    "C999",
+  ];
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ(paths.map((path) => ["M", path])),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    paths,
+  );
+  assert.ok(result.files.every((file) => file.status === "modified"));
+  assert.deepEqual(result.skipped, []);
+});
+
+test("accepts canonical Git rename and copy scores across their boundaries", () => {
+  const statuses = [
+    "R000",
+    "R001",
+    "R050",
+    "R099",
+    "R100",
+    "C000",
+    "C001",
+    "C050",
+    "C099",
+    "C100",
+  ];
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ(
+      statuses.map((status) => [status, `${status}-source.sql`, `${status}-target.sql`]),
+    ),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => [
+      file.rawStatus,
+      file.status,
+      file.beforePath,
+      file.afterPath,
+    ]),
+    statuses.map((status) => [
+      status,
+      status.startsWith("R") ? "renamed" : "unknown",
+      `${status}-source.sql`,
+      `${status}-target.sql`,
+    ]),
+  );
+  assert.deepEqual(result.skipped, []);
+});
+
+const invalidScoredStatuses = [
+  "R",
+  "C",
+  "Rabc",
+  "Cabc",
+  "R-1",
+  "C-1",
+  "R101",
+  "C101",
+  "R999",
+  "C999",
+  "R0",
+  "C0",
+  "R00",
+  "C00",
+  "R0000",
+  "C0000",
+  "R01",
+  "C01",
+  "R1000",
+  "C1000",
+  "R+001",
+  "C 001",
+  "R01.0",
+  "C١٠٠",
+] as const;
+
+for (const invalidStatus of invalidScoredStatuses) {
+  test(`rejects invalid rename/copy status ${JSON.stringify(invalidStatus)} transactionally`, () => {
+    let result: ReturnType<typeof parseGitDiffNameStatusZ> | undefined;
+    assert.throws(
+      () => {
+        result = parseGitDiffNameStatusZ(
+          nameStatusZ([
+            ["M", "models/valid-prefix.sql"],
+            [invalidStatus, "models/source.sql", "models/target.sql"],
+          ]),
+        );
+      },
+      (error: unknown) =>
+        error instanceof GitDiffNulParseError &&
+        /expected a valid status at field 3/i.test(error.message) &&
+        /no records were accepted/i.test(error.message),
+    );
+    assert.equal(result, undefined);
+  });
+}
+
+test("preserves status-shaped paths in rename and copy positions", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["R100", "M", "R100"],
+      ["R087", "C100", "D"],
+      ["C100", "A", "C100"],
+      ["C100", "source.sql", "A"],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "renamed",
+      path: "R100",
+      beforePath: "M",
+      afterPath: "R100",
+      rawStatus: "R100",
+    },
+    {
+      status: "renamed",
+      path: "D",
+      beforePath: "C100",
+      afterPath: "D",
+      rawStatus: "R087",
+    },
+    {
+      status: "unknown",
+      path: "C100",
+      beforePath: "A",
+      afterPath: "C100",
+      rawStatus: "C100",
+    },
+    {
+      status: "unknown",
+      path: "A",
+      beforePath: "source.sql",
+      afterPath: "A",
+      rawStatus: "C100",
+    },
+  ]);
+  assert.deepEqual(result.skipped, []);
+});
+
+test("parses consecutive records with status-shaped paths deterministically", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["M", "A"],
+      ["M", "good.sql"],
+      ["R100", "old.sql", "M"],
+      ["A", "R100"],
+      ["D", "path.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => [file.rawStatus, file.path]),
+    [
+      ["M", "A"],
+      ["M", "good.sql"],
+      ["R100", "M"],
+      ["A", "R100"],
+      ["D", "path.sql"],
+    ],
+  );
+  assert.deepEqual(result.skipped, []);
+});
+
+const malformedStatusShapedStreams = [
+  ["M", "A", "good.sql"],
+  ["R100", "old.sql", "M", "good.sql"],
+  ["C100", "old.sql", "A", "good.sql"],
+] as const;
+
+for (const fields of malformedStatusShapedStreams) {
+  test(`fails transactionally instead of reframing malformed fields ${fields.join(" / ")}`, () => {
+    let result: ReturnType<typeof parseGitDiffNameStatusZ> | undefined;
+    assert.throws(
+      () => {
+        result = parseGitDiffNameStatusZ(nameStatusZ([fields]));
+      },
+      (error: unknown) =>
+        error instanceof GitDiffNulParseError &&
+        /expected a valid status/i.test(error.message) &&
+        /no records were accepted/i.test(error.message),
+    );
+    assert.equal(result, undefined);
+  });
+}
+
+test("does not expose a valid prefix when a later record is structurally invalid", () => {
+  let result: ReturnType<typeof parseGitDiffNameStatusZ> | undefined;
+  assert.throws(
+    () => {
+      result = parseGitDiffNameStatusZ(
+        nameStatusZ([
+          ["M", "models/valid.sql"],
+          ["R100", "models/old.sql", "M"],
+          ["good.sql"],
+        ]),
+      );
+    },
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /expected a valid status/i.test(error.message) &&
+      /no records were accepted/i.test(error.message),
+  );
+  assert.equal(result, undefined);
+});
+
+test("fails closed on invalid or empty status fields", () => {
+  const invalidStatus = Buffer.concat([
+    Buffer.from([0xff, 0]),
+    Buffer.from("models/bad.sql\0M\0models/good.sql\0", "utf8"),
+  ]);
+  assert.throws(
+    () => parseGitDiffNameStatusZ(invalidStatus),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /expected a valid status/i.test(error.message),
+  );
+  assert.throws(
+    () =>
+      parseGitDiffNameStatusZ(
+        Buffer.from("\0models/bad.sql\0M\0models/good.sql\0", "utf8"),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiffNulParseError &&
+      /expected a valid status/i.test(error.message),
+  );
+});
+
+test("skips invalid UTF-8 rename and copy fields while preserving the next record", () => {
+  for (const malformedStatus of ["R100", "C100"] as const) {
+    const result = parseGitDiffNameStatusZ(
+      Buffer.concat([
+        Buffer.from(`${malformedStatus}\0models/old.sql\0`, "utf8"),
+        Buffer.from([0xc3, 0x28, 0]),
+        nameStatusZ([["M", "models/after-invalid.sql"]]),
+      ]),
+    );
+
+    assert.deepEqual(result.files, [
+      {
+        status: "modified",
+        path: "models/after-invalid.sql",
+        rawStatus: "M",
+      },
+    ]);
+    assert.equal(result.skipped.length, 1);
+    assert.match(result.skipped[0].reason, /path field 2 is not valid UTF-8/i);
+    assert.match(result.skipped[0].line, /0xc328/);
+  }
+});
+
+test("skips invalid UTF-8 paths without manufacturing replacement text", () => {
+  const invalidPath = Buffer.from([0xc3, 0x28]);
+  const result = parseGitDiffNameStatusZ(
+    Buffer.concat([
+      Buffer.from("M\0", "utf8"),
+      invalidPath,
+      Buffer.from([0]),
+      nameStatusZ([["M", "models/after-invalid.sql"]]),
+    ]),
+  );
+
+  assert.deepEqual(result.files.map((file) => file.path), ["models/after-invalid.sql"]);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /not valid UTF-8/i);
+  assert.match(result.skipped[0].line, /0xc328/);
+  assert.doesNotMatch(result.skipped[0].line, /�/);
+});
+
+test("keeps the public legacy text parser behavior unchanged", () => {
+  const result = parseGitDiffNameStatus(
+    'M\t"models/quoted\\303\\274.sql"\nC100\tmodels/source.sql\tmodels/copy.sql',
+  );
+
+  assert.equal(result.files[0].path, '"models/quoted\\303\\274.sql"');
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0].reason, /exactly one path/i);
 });

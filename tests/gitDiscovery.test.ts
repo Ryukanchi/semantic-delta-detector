@@ -19,14 +19,21 @@ const headCommit = "b".repeat(40) as VerifiedGitCommitHash;
 
 function commandResult(
   status: number,
-  stdout = "",
+  stdout: string | Buffer = "",
   stderr = "",
 ): GitCommandResult {
   return {
     status,
-    stdout: Buffer.from(stdout),
+    stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout),
     stderr: Buffer.from(stderr),
   };
+}
+
+function nameStatusZ(records: ReadonlyArray<readonly string[]>): Buffer {
+  const fields = records.flat();
+  return fields.length === 0
+    ? Buffer.alloc(0)
+    : Buffer.from(`${fields.join("\0")}\0`, "utf8");
 }
 
 function queuedRunner(
@@ -50,13 +57,13 @@ test("discovers changed files with argument-array Git commands", () => {
       commandResult(0, `${headCommit}\n`),
       commandResult(
         0,
-        [
-          "M\tmodels/revenue.sql",
-          "A\tmodels/new.sql",
-          "R100\tmodels/old.sql\tmodels/renamed.sql",
-          "T\tmodels/type-change.sql",
-          "malformed",
-        ].join("\n"),
+        nameStatusZ([
+          ["M", "models/revenue.sql"],
+          ["A", "models/new.sql"],
+          ["R100", "models/old.sql", "models/renamed.sql"],
+          ["T", "models/type-change.sql"],
+          ["M", ""],
+        ]),
       ),
     ],
     calls,
@@ -90,6 +97,7 @@ test("discovers changed files with argument-array Git commands", () => {
     process.cwd(),
     "diff",
     "--name-status",
+    "-z",
     "--find-renames",
     baseCommit,
     headCommit,
@@ -100,9 +108,181 @@ test("discovers changed files with argument-array Git commands", () => {
     ["modified", "added", "renamed", "unknown"],
   );
   assert.equal(result.parserSkipped.length, 1);
-  assert.match(result.parserSkipped[0].reason, /tab-separated/i);
+  assert.match(result.parserSkipped[0].reason, /path field 1 is empty/i);
   assert.equal(result.candidates[2].beforePath, "models/old.sql");
   assert.equal(result.candidates[2].afterPath, "models/renamed.sql");
+});
+
+test("discovers exact special-character rename and copy paths from NUL output", () => {
+  const renamedBefore = 'models/old\t"\\名.sql';
+  const renamedAfter = 'models/new\n"\\名.sql';
+  const copiedBefore = "models/source ユニコード.sql";
+  const copiedAfter = "models/copy\tname.sql";
+  const result = discoverGitChangedFiles(
+    {
+      repositoryPath: process.cwd(),
+      baseRef: "BASE",
+      headRef: "HEAD",
+    },
+    queuedRunner(
+      [
+        commandResult(0, "true\n"),
+        commandResult(0, `${baseCommit}\n`),
+        commandResult(0, `${headCommit}\n`),
+        commandResult(
+          0,
+          nameStatusZ([
+            ["M", "models/深い directory/tab\tline\nquote\"slash\\.sql"],
+            ["R100", renamedBefore, renamedAfter],
+            ["C100", copiedBefore, copiedAfter],
+          ]),
+        ),
+      ],
+      [],
+    ),
+  );
+
+  assert.deepEqual(result.files[1], {
+    status: "renamed",
+    path: renamedAfter,
+    beforePath: renamedBefore,
+    afterPath: renamedAfter,
+    rawStatus: "R100",
+  });
+  assert.deepEqual(result.files[2], {
+    status: "unknown",
+    path: copiedAfter,
+    beforePath: copiedBefore,
+    afterPath: copiedAfter,
+    rawStatus: "C100",
+  });
+  assert.equal(
+    result.files[0].path,
+    "models/深い directory/tab\tline\nquote\"slash\\.sql",
+  );
+  assert.deepEqual(result.parserSkipped, []);
+});
+
+test("keeps invalid UTF-8 discovery paths out of candidates", () => {
+  const invalidDiff = Buffer.concat([
+    Buffer.from("M\0", "utf8"),
+    Buffer.from([0xc3, 0x28, 0]),
+  ]);
+  const result = discoverGitChangedFiles(
+    {
+      repositoryPath: process.cwd(),
+      baseRef: "BASE",
+      headRef: "HEAD",
+    },
+    queuedRunner(
+      [
+        commandResult(0, "true\n"),
+        commandResult(0, `${baseCommit}\n`),
+        commandResult(0, `${headCommit}\n`),
+        commandResult(0, invalidDiff),
+      ],
+      [],
+    ),
+  );
+
+  assert.deepEqual(result.files, []);
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.parserSkipped.length, 1);
+  assert.match(result.parserSkipped[0].reason, /not valid UTF-8/i);
+  assert.match(result.parserSkipped[0].line, /0xc328/);
+});
+
+test("discovers status-shaped filenames without treating them as record boundaries", () => {
+  const result = discoverGitChangedFiles(
+    {
+      repositoryPath: process.cwd(),
+      baseRef: "BASE",
+      headRef: "HEAD",
+    },
+    queuedRunner(
+      [
+        commandResult(0, "true\n"),
+        commandResult(0, `${baseCommit}\n`),
+        commandResult(0, `${headCommit}\n`),
+        commandResult(
+          0,
+          nameStatusZ([
+            ["M", "A"],
+            ["R100", "models/old.sql", "M"],
+          ]),
+        ),
+      ],
+      [],
+    ),
+  );
+
+  assert.deepEqual(result.files, [
+    {
+      status: "modified",
+      path: "A",
+      rawStatus: "M",
+    },
+    {
+      status: "renamed",
+      path: "M",
+      beforePath: "models/old.sql",
+      afterPath: "M",
+      rawStatus: "R100",
+    },
+  ]);
+  assert.deepEqual(result.candidates, [
+    {
+      path: "A",
+      status: "modified",
+      hasBefore: true,
+      hasAfter: true,
+    },
+    {
+      path: "M",
+      status: "renamed",
+      beforePath: "models/old.sql",
+      afterPath: "M",
+      hasBefore: true,
+      hasAfter: true,
+    },
+  ]);
+  assert.deepEqual(result.parserSkipped, []);
+});
+
+test("surfaces structurally invalid NUL output as an operational discovery error", () => {
+  const calls: string[][] = [];
+  assert.throws(
+    () =>
+      discoverGitChangedFiles(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: "BASE",
+          headRef: "HEAD",
+        },
+        queuedRunner(
+          [
+            commandResult(0, "true\n"),
+            commandResult(0, `${baseCommit}\n`),
+            commandResult(0, `${headCommit}\n`),
+            commandResult(
+              0,
+              nameStatusZ([
+                ["R100", "models/old.sql", "M"],
+                ["good.sql"],
+              ]),
+            ),
+          ],
+          calls,
+        ),
+      ),
+    (error: unknown) =>
+      error instanceof GitDiscoveryError &&
+      /Could not safely parse Git diff output/.test(error.message) &&
+      /expected a valid status/.test(error.message) &&
+      /no records were accepted/.test(error.message),
+  );
+  assert.equal(calls.length, 4);
+  assert.equal(calls.some((args) => args[2] === "show"), false);
 });
 
 test("surfaces successful Git stderr as warnings", () => {

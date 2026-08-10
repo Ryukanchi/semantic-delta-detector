@@ -17,6 +17,8 @@ export interface CandidatePair {
 
 export interface SkippedCandidate {
   path: string;
+  beforePath?: string;
+  afterPath?: string;
   reason: string;
 }
 
@@ -28,6 +30,12 @@ export interface CandidatePairingResult {
 function skipCandidate(candidate: CandidateFile, reason: string): SkippedCandidate {
   return {
     path: candidate.path,
+    ...(candidate.beforePath !== undefined && candidate.afterPath !== undefined
+      ? {
+          beforePath: candidate.beforePath,
+          afterPath: candidate.afterPath,
+        }
+      : {}),
     reason,
   };
 }
