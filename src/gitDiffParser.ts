@@ -69,13 +69,7 @@ interface NulStatusDescriptor {
 interface NulPlanStep {
   statusIndex: number;
   descriptor: NulStatusDescriptor;
-  consumedPathCount: number;
   nextIndex: number;
-}
-
-interface NulPlanState {
-  count: 0 | 1 | 2;
-  choice?: NulPlanStep;
 }
 
 export class GitDiffNulParseError extends Error {
@@ -198,86 +192,33 @@ function tokenizeNulOutput(output: Buffer): Buffer[] {
 }
 
 function buildNulPlan(fields: Buffer[]): NulPlanStep[] {
-  const descriptors = fields.map((field) => describeNulStatus(field));
-  const states: NulPlanState[] = Array.from(
-    { length: fields.length + 1 },
-    (): NulPlanState => ({ count: 0 }),
-  );
-  states[fields.length] = { count: 1 };
-
-  for (let statusIndex = fields.length - 1; statusIndex >= 0; statusIndex -= 1) {
-    const descriptor = descriptors[statusIndex];
-    if (!descriptor) {
-      continue;
-    }
-
-    const options: Array<{ step: NulPlanStep; childCount: 1 | 2 }> = [];
-    const addOption = (consumedPathCount: number): void => {
-      const nextIndex = statusIndex + 1 + consumedPathCount;
-      const childState = states[nextIndex];
-      if (!childState || childState.count === 0) {
-        return;
-      }
-
-      options.push({
-        step: {
-          statusIndex,
-          descriptor,
-          consumedPathCount,
-          nextIndex,
-        },
-        childCount: childState.count,
-      });
-    };
-
-    if (statusIndex + 1 + descriptor.pathFieldCount <= fields.length) {
-      addOption(descriptor.pathFieldCount);
-    }
-
-    for (
-      let consumedPathCount = 0;
-      consumedPathCount < descriptor.pathFieldCount;
-      consumedPathCount += 1
-    ) {
-      const recoveryIndex = statusIndex + 1 + consumedPathCount;
-      if (recoveryIndex < fields.length && descriptors[recoveryIndex]) {
-        addOption(consumedPathCount);
-      }
-    }
-
-    let planCount: 0 | 1 | 2 = 0;
-    for (const option of options) {
-      planCount = Math.min(2, planCount + option.childCount) as 0 | 1 | 2;
-    }
-    states[statusIndex] =
-      planCount === 1 && options.length === 1 && options[0].childCount === 1
-        ? { count: 1, choice: options[0].step }
-        : { count: planCount };
-  }
-
-  const rootState = states[0];
-  if (!rootState || rootState.count === 0) {
-    throw new GitDiffNulParseError(
-      `NUL-delimited Git diff output has no safe complete record framing; no records were accepted. Fields: ${formatNulStreamPreview(fields)}`,
-    );
-  }
-  if (rootState.count > 1) {
-    throw new GitDiffNulParseError(
-      `NUL-delimited Git diff output has ambiguous record boundaries; no records were accepted. Fields: ${formatNulStreamPreview(fields)}`,
-    );
-  }
-
   const plan: NulPlanStep[] = [];
-  let index = 0;
-  while (index < fields.length) {
-    const choice = states[index]?.choice;
-    if (!choice) {
+  let statusIndex = 0;
+
+  // Record boundaries come only from the arity of a status already reached in
+  // status position. Path bytes are never inspected to guess a later boundary.
+  while (statusIndex < fields.length) {
+    const descriptor = describeNulStatus(fields[statusIndex]);
+    if (!descriptor) {
       throw new GitDiffNulParseError(
-        "NUL-delimited Git diff output could not be reconstructed safely; no records were accepted.",
+        `NUL-delimited Git diff output expected a valid status at field ${statusIndex + 1}; no records were accepted. Fields: ${formatNulStreamPreview(fields)}`,
       );
     }
-    plan.push(choice);
-    index = choice.nextIndex;
+
+    const nextIndex = statusIndex + 1 + descriptor.pathFieldCount;
+    if (nextIndex > fields.length) {
+      const availablePathCount = fields.length - statusIndex - 1;
+      throw new GitDiffNulParseError(
+        `NUL-delimited Git diff output has a truncated ${descriptor.rawStatus} entry at field ${statusIndex + 1}; expected ${descriptor.pathFieldCount} path field${descriptor.pathFieldCount === 1 ? "" : "s"} but found ${availablePathCount}. No records were accepted. Fields: ${formatNulStreamPreview(fields)}`,
+      );
+    }
+
+    plan.push({
+      statusIndex,
+      descriptor,
+      nextIndex,
+    });
+    statusIndex = nextIndex;
   }
 
   return plan;
@@ -299,17 +240,8 @@ export function parseGitDiffNameStatusZ(
   };
 
   for (const step of plan) {
-    const { descriptor, statusIndex, consumedPathCount } = step;
+    const { descriptor, statusIndex } = step;
     const recordFields = fields.slice(statusIndex, step.nextIndex);
-    if (consumedPathCount < descriptor.pathFieldCount) {
-      skipNulRecord(
-        result,
-        recordFields,
-        `${descriptor.rawStatus} entry is truncated; expected ${descriptor.pathFieldCount} path field${descriptor.pathFieldCount === 1 ? "" : "s"} but only ${consumedPathCount} could be assigned without consuming a later record`,
-      );
-      continue;
-    }
-
     const pathFields = fields.slice(
       statusIndex + 1,
       statusIndex + 1 + descriptor.pathFieldCount,

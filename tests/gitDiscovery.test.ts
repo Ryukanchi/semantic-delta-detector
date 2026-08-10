@@ -192,7 +192,7 @@ test("keeps invalid UTF-8 discovery paths out of candidates", () => {
   assert.match(result.parserSkipped[0].line, /0xc328/);
 });
 
-test("keeps a later valid discovery record after a truncated rename", () => {
+test("discovers status-shaped filenames without treating them as record boundaries", () => {
   const result = discoverGitChangedFiles(
     {
       repositoryPath: process.cwd(),
@@ -207,8 +207,8 @@ test("keeps a later valid discovery record after a truncated rename", () => {
         commandResult(
           0,
           nameStatusZ([
-            ["R100", "models/incomplete.sql"],
-            ["M", "models/good.sql"],
+            ["M", "A"],
+            ["R100", "models/old.sql", "M"],
           ]),
         ),
       ],
@@ -219,23 +219,37 @@ test("keeps a later valid discovery record after a truncated rename", () => {
   assert.deepEqual(result.files, [
     {
       status: "modified",
-      path: "models/good.sql",
+      path: "A",
       rawStatus: "M",
+    },
+    {
+      status: "renamed",
+      path: "M",
+      beforePath: "models/old.sql",
+      afterPath: "M",
+      rawStatus: "R100",
     },
   ]);
   assert.deepEqual(result.candidates, [
     {
-      path: "models/good.sql",
+      path: "A",
       status: "modified",
       hasBefore: true,
       hasAfter: true,
     },
+    {
+      path: "M",
+      status: "renamed",
+      beforePath: "models/old.sql",
+      afterPath: "M",
+      hasBefore: true,
+      hasAfter: true,
+    },
   ]);
-  assert.equal(result.parserSkipped.length, 1);
-  assert.match(result.parserSkipped[0].reason, /R100 entry is truncated/i);
+  assert.deepEqual(result.parserSkipped, []);
 });
 
-test("surfaces ambiguous NUL framing as an operational discovery error", () => {
+test("surfaces structurally invalid NUL output as an operational discovery error", () => {
   const calls: string[][] = [];
   assert.throws(
     () =>
@@ -254,8 +268,7 @@ test("surfaces ambiguous NUL framing as an operational discovery error", () => {
               0,
               nameStatusZ([
                 ["R100", "models/old.sql", "M"],
-                ["A", "R100"],
-                ["D", "models/path.sql"],
+                ["good.sql"],
               ]),
             ),
           ],
@@ -265,7 +278,7 @@ test("surfaces ambiguous NUL framing as an operational discovery error", () => {
     (error: unknown) =>
       error instanceof GitDiscoveryError &&
       /Could not safely parse Git diff output/.test(error.message) &&
-      /ambiguous record boundaries/.test(error.message) &&
+      /expected a valid status/.test(error.message) &&
       /no records were accepted/.test(error.message),
   );
   assert.equal(calls.length, 4);

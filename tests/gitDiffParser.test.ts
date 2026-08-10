@@ -390,98 +390,132 @@ test("fails closed on missing terminal NUL and truncated EOF", () => {
       ),
     (error: unknown) =>
       error instanceof GitDiffNulParseError &&
-      /no safe complete record framing/i.test(error.message) &&
+      /truncated R100 entry/i.test(error.message) &&
       /no records were accepted/i.test(error.message),
   );
 });
 
-const recoverableLaterRecords = [
-  {
-    name: "modified",
-    fields: ["M", "models/good.sql"],
-    expected: {
-      status: "modified",
-      path: "models/good.sql",
-      rawStatus: "M",
-    },
-  },
-  {
-    name: "added",
-    fields: ["A", "models/good.sql"],
-    expected: {
-      status: "added",
-      path: "models/good.sql",
-      rawStatus: "A",
-    },
-  },
-  {
-    name: "deleted",
-    fields: ["D", "models/good.sql"],
-    expected: {
-      status: "deleted",
-      path: "models/good.sql",
-      rawStatus: "D",
-    },
-  },
-  {
-    name: "unknown",
-    fields: ["T", "models/good.sql"],
-    expected: {
-      status: "unknown",
-      path: "models/good.sql",
-      rawStatus: "T",
-    },
-  },
-  {
-    name: "rename",
-    fields: ["R100", "models/later-old.sql", "models/later-new.sql"],
-    expected: {
+test("treats status-shaped fields as literal paths in one-path records", () => {
+  const paths = ["M", "A", "D", "T", "U", "R100", "R087", "C100"];
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ(paths.map((path) => ["M", path])),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => file.path),
+    paths,
+  );
+  assert.ok(result.files.every((file) => file.status === "modified"));
+  assert.deepEqual(result.skipped, []);
+});
+
+test("preserves status-shaped paths in rename and copy positions", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["R100", "M", "R100"],
+      ["R087", "C100", "D"],
+      ["C100", "A", "C100"],
+      ["C100", "source.sql", "A"],
+    ]),
+  );
+
+  assert.deepEqual(result.files, [
+    {
       status: "renamed",
-      path: "models/later-new.sql",
-      beforePath: "models/later-old.sql",
-      afterPath: "models/later-new.sql",
+      path: "R100",
+      beforePath: "M",
+      afterPath: "R100",
       rawStatus: "R100",
     },
-  },
+    {
+      status: "renamed",
+      path: "D",
+      beforePath: "C100",
+      afterPath: "D",
+      rawStatus: "R087",
+    },
+    {
+      status: "unknown",
+      path: "C100",
+      beforePath: "A",
+      afterPath: "C100",
+      rawStatus: "C100",
+    },
+    {
+      status: "unknown",
+      path: "A",
+      beforePath: "source.sql",
+      afterPath: "A",
+      rawStatus: "C100",
+    },
+  ]);
+  assert.deepEqual(result.skipped, []);
+});
+
+test("parses consecutive records with status-shaped paths deterministically", () => {
+  const result = parseGitDiffNameStatusZ(
+    nameStatusZ([
+      ["M", "A"],
+      ["M", "good.sql"],
+      ["R100", "old.sql", "M"],
+      ["A", "R100"],
+      ["D", "path.sql"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.files.map((file) => [file.rawStatus, file.path]),
+    [
+      ["M", "A"],
+      ["M", "good.sql"],
+      ["R100", "M"],
+      ["A", "R100"],
+      ["D", "path.sql"],
+    ],
+  );
+  assert.deepEqual(result.skipped, []);
+});
+
+const malformedStatusShapedStreams = [
+  ["M", "A", "good.sql"],
+  ["R100", "old.sql", "M", "good.sql"],
+  ["C100", "old.sql", "A", "good.sql"],
 ] as const;
 
-for (const malformedStatus of ["R100", "C100"] as const) {
-  for (const laterRecord of recoverableLaterRecords) {
-    test(`recovers the later ${laterRecord.name} record after truncated ${malformedStatus}`, () => {
-      const result = parseGitDiffNameStatusZ(
-        nameStatusZ([
-          [malformedStatus, "models/incomplete.sql"],
-          laterRecord.fields,
-        ]),
-      );
-
-      assert.deepEqual(result.files, [laterRecord.expected]);
-      assert.equal(result.skipped.length, 1);
-      assert.match(result.skipped[0].reason, /entry is truncated/i);
-      assert.match(result.skipped[0].reason, /only 1 could be assigned/i);
-      assert.equal(
-        result.skipped[0].line,
-        `${JSON.stringify(malformedStatus)} NUL "models/incomplete.sql"`,
-      );
-    });
-  }
+for (const fields of malformedStatusShapedStreams) {
+  test(`fails transactionally instead of reframing malformed fields ${fields.join(" / ")}`, () => {
+    let result: ReturnType<typeof parseGitDiffNameStatusZ> | undefined;
+    assert.throws(
+      () => {
+        result = parseGitDiffNameStatusZ(nameStatusZ([fields]));
+      },
+      (error: unknown) =>
+        error instanceof GitDiffNulParseError &&
+        /expected a valid status/i.test(error.message) &&
+        /no records were accepted/i.test(error.message),
+    );
+    assert.equal(result, undefined);
+  });
 }
 
-test("fails closed instead of choosing between ambiguous complete framings", () => {
+test("does not expose a valid prefix when a later record is structurally invalid", () => {
+  let result: ReturnType<typeof parseGitDiffNameStatusZ> | undefined;
   assert.throws(
-    () =>
-      parseGitDiffNameStatusZ(
+    () => {
+      result = parseGitDiffNameStatusZ(
         nameStatusZ([
+          ["M", "models/valid.sql"],
           ["R100", "models/old.sql", "M"],
-          ["A", "R100"],
-          ["D", "models/path.sql"],
+          ["good.sql"],
         ]),
-      ),
+      );
+    },
     (error: unknown) =>
       error instanceof GitDiffNulParseError &&
-      /ambiguous record boundaries/i.test(error.message) &&
+      /expected a valid status/i.test(error.message) &&
       /no records were accepted/i.test(error.message),
   );
+  assert.equal(result, undefined);
 });
 
 test("fails closed on invalid or empty status fields", () => {
@@ -493,7 +527,7 @@ test("fails closed on invalid or empty status fields", () => {
     () => parseGitDiffNameStatusZ(invalidStatus),
     (error: unknown) =>
       error instanceof GitDiffNulParseError &&
-      /no safe complete record framing/i.test(error.message),
+      /expected a valid status/i.test(error.message),
   );
   assert.throws(
     () =>
@@ -502,7 +536,7 @@ test("fails closed on invalid or empty status fields", () => {
       ),
     (error: unknown) =>
       error instanceof GitDiffNulParseError &&
-      /no safe complete record framing/i.test(error.message),
+      /expected a valid status/i.test(error.message),
   );
 });
 

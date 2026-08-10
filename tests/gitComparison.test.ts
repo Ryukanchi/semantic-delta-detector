@@ -360,25 +360,39 @@ test("keeps copy paths attached when another record has the same target path", (
   ]);
 });
 
-test("recovers a valid comparison after a truncated rename without fake accounting", () => {
-  const result = compareWithRunner(
-    nameStatusZ([
-      ["R100", "models/incomplete.sql"],
-      ["M", "models/good.sql"],
-    ]),
-    [
-      commandResult(0, "SELECT COUNT(*) FROM users"),
-      commandResult(0, "SELECT COUNT(*) FROM users"),
-    ],
-  );
+test("fails malformed framing before comparison or content loading", () => {
+  const calls: string[][] = [];
+  const results = [
+    commandResult(0, "true\n"),
+    commandResult(0, `${baseCommit}\n`),
+    commandResult(0, `${headCommit}\n`),
+    commandResult(
+      0,
+      nameStatusZ([
+        ["R100", "models/old.sql", "M"],
+        ["models/good.sql"],
+      ]),
+    ),
+  ];
+  const runner: GitCommandRunner = (args) => {
+    calls.push([...args]);
+    const result = results.shift();
+    assert.ok(result, `Unexpected Git command: ${args.join(" ")}`);
+    return result;
+  };
 
-  assert.deepEqual(result.summary, {
-    discoveredCount: 2,
-    analyzedCount: 1,
-    skippedCount: 1,
-    highestSeverity: "low",
-  });
-  assert.deepEqual(result.analyzed.map((file) => file.path), ["models/good.sql"]);
-  assert.deepEqual(result.skipped.map((item) => item.stage), ["git-parse"]);
-  assert.match(result.skipped[0].reason, /R100 entry is truncated/i);
+  assert.throws(
+    () =>
+      compareGitChanges(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: "BASE",
+          headRef: "HEAD",
+        },
+        runner,
+      ),
+    /Could not safely parse Git diff output.*expected a valid status.*no records were accepted/i,
+  );
+  assert.equal(calls.length, 4);
+  assert.equal(calls.some((args) => args[2] === "show"), false);
 });
