@@ -396,3 +396,40 @@ test("fails malformed framing before comparison or content loading", () => {
   assert.equal(calls.length, 4);
   assert.equal(calls.some((args) => args[2] === "show"), false);
 });
+
+test("rejects an invalid rename score before partial accounting or content loading", () => {
+  const calls: string[][] = [];
+  const results = [
+    commandResult(0, "true\n"),
+    commandResult(0, `${baseCommit}\n`),
+    commandResult(0, `${headCommit}\n`),
+    commandResult(
+      0,
+      nameStatusZ([
+        ["M", "models/valid-prefix.sql"],
+        ["R999", "models/old.sql", "models/new.sql"],
+      ]),
+    ),
+  ];
+  const runner: GitCommandRunner = (args) => {
+    calls.push([...args]);
+    const result = results.shift();
+    assert.ok(result, `Unexpected Git command: ${args.join(" ")}`);
+    return result;
+  };
+
+  assert.throws(
+    () =>
+      compareGitChanges(
+        {
+          repositoryPath: process.cwd(),
+          baseRef: "BASE",
+          headRef: "HEAD",
+        },
+        runner,
+      ),
+    /Could not safely parse Git diff output.*expected a valid status at field 3.*no records were accepted/i,
+  );
+  assert.equal(calls.length, 4);
+  assert.equal(calls.some((args) => args[2] === "show"), false);
+});

@@ -114,25 +114,23 @@ function describeNulStatus(field: Buffer): NulStatusDescriptor | undefined {
     return undefined;
   }
 
-  if (/^R(?:[0-9]{1,3})?$/.test(rawStatus)) {
+  const scoredStatus = /^([RC])([0-9]{3})$/.exec(rawStatus);
+  if (scoredStatus) {
+    const score = Number(scoredStatus[2]);
+    if (score > 100) {
+      return undefined;
+    }
+
+    const isCopy = scoredStatus[1] === "C";
     return {
       rawStatus,
-      status: "renamed",
+      status: isCopy ? "unknown" : "renamed",
       pathFieldCount: 2,
-      isCopy: false,
+      isCopy,
     };
   }
 
-  if (/^C(?:[0-9]{1,3})?$/.test(rawStatus)) {
-    return {
-      rawStatus,
-      status: "unknown",
-      pathFieldCount: 2,
-      isCopy: true,
-    };
-  }
-
-  if (/^[A-Z]$/.test(rawStatus)) {
+  if (/^[A-Z]$/.test(rawStatus) && rawStatus !== "R" && rawStatus !== "C") {
     return {
       rawStatus,
       status: mapStatus(rawStatus),
