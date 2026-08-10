@@ -5,8 +5,8 @@ Local Git mode compares SQL changes between two refs without mutating a reposito
 ## Pipeline
 
 ```text
-git diff --name-status <base> <head>
-→ parse status rows
+git diff --name-status -z --find-renames <base-hash> <head-hash> --
+→ parse the NUL-delimited byte stream
 → CandidateFile metadata
 → include/ignore filtering
 → conservative before/after pairing
@@ -15,7 +15,11 @@ git diff --name-status <base> <head>
 → aggregate text, simulated PR, or JSON output
 ```
 
-`discoverGitChangedFiles()` validates the repository, resolves user-provided refs to commit hashes, runs the name-status diff, and preserves parser skips and Git warnings. `loadGitPairContent()` reads only pairs that survived filtering and pairing. It rejects unavailable content, NUL-containing content, and invalid UTF-8 instead of claiming that content exists.
+`discoverGitChangedFiles()` validates the repository, resolves user-provided refs to commit hashes, runs the byte-oriented name-status diff, and preserves parser skips and Git warnings. Because `-z` disables Git's C-quoting and uses NUL field separators, Unicode paths and paths containing spaces, quotes, backslashes, tabs, or newlines are preserved exactly.
+
+The parser determines record boundaries only from status arity: ordinary statuses consume one path, while canonical `R000`–`R100` and `C000`–`C100` statuses consume two. It validates the complete framing plan before accepting any records, so a missing terminal NUL, invalid status, invalid rename/copy score, or truncated record fails transactionally instead of reframing later fields. Path fields are decoded independently with strict UTF-8; invalid or empty paths are skipped observably without manufacturing replacement text, while valid later records remain intact.
+
+`loadGitPairContent()` reads only pairs that survived filtering and pairing. It rejects unavailable content, NUL-containing content, and invalid UTF-8 instead of claiming that content exists.
 
 Git subprocesses use argument arrays without a shell. Refs are resolved with `rev-parse --verify --end-of-options`; subsequent diff and show operations use resolved hashes. Expected repository, ref, and content errors are reported without raw stack traces by the CLI.
 
@@ -56,6 +60,5 @@ Text output shows complete findings and skips. `--pr` prints one concise simulat
 - No GitHub API calls or real PR comments.
 - No semantic analysis for added or deleted metrics.
 - No worktree or index comparison; both inputs are explicit commit refs.
-- The name-status parser expects tab-separated text output and does not fully support pathological filenames containing tabs or newlines.
 - Path patterns intentionally support only the repository's existing simple matching rules, not full glob syntax.
 - SQL analysis remains heuristic; parser limitation notes continue to apply to CTEs, CASE expressions, and subqueries.
