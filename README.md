@@ -1,88 +1,36 @@
-# semantic-delta-detector
+# Semantic Delta Detector
 
-## 🚨 Example: Decision Report
+**Catch metric drift before it becomes a dashboard problem.**
 
-![Decision Report](docs/assets/decision-report.png)
+`Changed SQL → Semantic Impact → Why it matters`
 
-Similar SQL. Different meaning. High-risk metric drift caught early.
-The report summarizes verdict, business impact, evidence, and the recommended reviewer action.
+![Semantic Delta decision report](docs/assets/decision-report.png)
 
-## 🚨 What this solves
-A dashboard can show “active users” in two places and hide two different definitions.
-One team may count product logins.
-Another may count paying users who were recently active.
+Semantic Delta is a local-first semantic risk detector for SQL metric changes. It compares changed SQL, explains how the business meaning may have shifted, and gives reviewers evidence and a recommended action.
 
-semantic-delta-detector helps catch that drift before teams compare incompatible KPIs, trust the wrong chart, or make decisions from the wrong number.
+It is an intentionally heuristic early-warning system—not a SQL validator, equivalence prover, or replacement for metric ownership.
 
-## Try it locally
-From a cloned repo:
+## Why this exists
 
-```bash
-npm install
-npm run compare -- --example unique-login-users-vs-login-event-rows --pr
-```
+Two dashboards can both show “active users” while measuring different populations:
 
-## 🔍 Example (the hook)
-Two SQL queries can look similar, share a metric name, and still answer different business questions.
+- one counts unique users who logged in;
+- another counts every login event;
+- another includes only recently active paying users.
 
-Same metric name. Different business meaning. A dashboard mistake caught early.
+The SQL may look similar, but the resulting KPIs are not interchangeable. Semantic Delta surfaces that difference before it becomes misleading reporting or a bad product, finance, or growth decision.
 
-## 🔍 Detailed Analysis Example
+## Quick start
 
-This is a more detailed breakdown of the semantic comparison output.
-
-![Demo Output](docs/assets/demo-output.png)
-
-## 💡 What it does
-- Acts as a semantic risk engine for SQL metric changes
-- Identifies mismatches in business meaning
-- Outputs similarity, risk, confidence, and explanation
-- Can use optional metric metadata when provided
-
-## ⚠️ Why this matters
-- Misleading KPIs create false confidence
-- Inconsistent dashboards erode trust between teams
-- Similar metric names can hide different qualification rules
-- Bad definitions lead to bad product, finance, and growth decisions
-
-## ⚙️ How it works (simple)
-- Reads two SQL-backed metric definitions
-- Extracts tables, filters, time windows, and aggregations
-- Infers the likely business meaning of each query
-- Compares whether there is semantic risk in treating them as the same metric
-- Returns a compact risk report with explanation and recommendation
-
-## Semantic Risk Examples
-Same-looking SQL changes can mean different KPIs. These examples show the kinds of semantic drift the detector is designed to flag.
-
-| Scenario | Query A meaning | Query B meaning | Risk | Why it matters |
-| --- | --- | --- | --- | --- |
-| Login events -> all events | Login events | All events | Medium | Removing `event = 'login'` broadens the metric from one activity to every event row. |
-| Paid users -> all users | Monetized users | All users | High | Removing a paid/subscription gate changes the population behind the KPI. |
-| 7-day logins -> 30-day logins | 7-day login events | 30-day login events | Medium | Same event concept, different reporting window. |
-| Paid order count -> paid order revenue | Count of paid orders | Revenue from paid orders | High | Count and monetary value should not be treated as the same metric. |
-| Paid orders -> paid payments | Paid order records | Paid payment records | High | Orders and payments can represent different source-of-truth lifecycles. |
-| DE users -> US users | German users | US users | Medium | Same metric shape, different user cohort. |
-| Joined users/orders -> all users | Users with matching orders or joined rows | All users | High | A join can exclude users without orders or multiply rows for users with many orders. |
-| Unique login users -> login event rows | Unique users who logged in | Login event rows | High | Repeated events by the same user can make row counts much larger than user counts. |
-| Non-deleted users -> all users | Users excluding deleted users | All users | Medium | Removing an exclusion can bring deleted users into the population. |
-| External users -> all users | Users excluding internal/test accounts | All users | Medium | Internal or test accounts can distort customer/user KPIs. |
-| Daily login counts -> monthly login counts | Daily login event counts | Monthly login event counts | Medium | Same activity and aggregation, but different reporting grain; daily and monthly trend points are not directly comparable. |
-| LEFT JOIN users/orders -> INNER JOIN users/orders | All users with optional order matches | Users with matching order records | High | Changing LEFT JOIN to INNER JOIN can exclude users without orders and change population inclusion. |
-
-## Pull Request Simulation
-### Local PR Simulation
-Preview the kind of short review comment Semantic Delta could add to a pull request. This local mode does not call the GitHub API yet; it reads before/after SQL files and prints a PR-style risk comment.
+The repository uses pnpm 10 and is tested in CI with Node.js 24.
 
 ```bash
-npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr
+pnpm install
+pnpm run compare -- --example unique-login-users-vs-login-event-rows --pr
 ```
 
-Files used:
-- `examples/pr-before.sql`
-- `examples/pr-after.sql`
+Example result:
 
-Example output:
 ```text
 🔴 HIGH RISK
 This change alters the meaning of the metric.
@@ -90,19 +38,90 @@ This change alters the meaning of the metric.
 Impact: aggregation changes may change what is counted.
 Evidence:
 - Aggregation changed from COUNT(DISTINCT user_id) to COUNT(*).
-Recommendation: Do not compare unique-user login counts with login event-row counts as the same KPI. Confirm whether the metric is intended to count users or events.
+Recommendation: Confirm whether the metric is intended to count users or events.
 ```
 
-### Optional CI Gating
-CI can opt into failing on semantic risk by adding `--fail-on low|medium|high|critical`:
+## Compare changed SQL between Git refs
+
+The primary MVP workflow compares changed SQL files between two local Git refs:
 
 ```bash
-npm run compare -- --before ./examples/pr-before.sql --after ./examples/pr-after.sql --pr --fail-on high
+pnpm run compare -- \
+  --changed-from origin/main \
+  --changed-to HEAD \
+  --repo ../analytics-repo
 ```
 
-Without `--fail-on`, the command prints the preview report without failing based on semantic risk.
+`--changed-from` is always required. Semantic Delta does not guess a base branch. `--changed-to` defaults to `HEAD`, and `--repo` defaults to the current directory.
 
-Teams can also set a repo-level default in `semantic-delta.yml`:
+The Git workflow is:
+
+```text
+Git refs
+→ changed-file discovery
+→ include/ignore filtering
+→ conservative before/after pairing
+→ semantic comparison per file
+→ aggregate report
+→ optional severity gate
+```
+
+![Semantic Delta aggregate Git comparison](docs/assets/git-comparison-report.png)
+
+Git mode:
+
+- analyzes modified SQL files and complete renames;
+- preserves exact before/after paths for renamed files;
+- reports added, deleted, copied, filtered, malformed, or unreadable records as explicit skips;
+- preserves ordering and duplicate records;
+- guarantees that every discovered record is either analyzed or skipped;
+- derives aggregate severity only from files that were actually analyzed.
+
+When no `include` rules are configured, Git mode considers `**/*.sql`. `ignore` rules take precedence over `include` rules.
+
+## Output modes
+
+### Readable aggregate report
+
+```bash
+pnpm run compare -- --changed-from origin/main --changed-to HEAD
+```
+
+### Simulated PR-style report
+
+```bash
+pnpm run compare -- --changed-from origin/main --changed-to HEAD --pr
+```
+
+This prints a concise preview only. It does not post a pull-request comment or call the GitHub API.
+
+### Complete JSON report
+
+```bash
+pnpm run --silent compare -- \
+  --changed-from origin/main \
+  --changed-to HEAD \
+  --format json
+```
+
+JSON retains resolved refs, analyzed findings, skipped records, warnings, and accounting totals.
+
+### Optional severity gating
+
+```bash
+pnpm run compare -- \
+  --changed-from origin/main \
+  --changed-to HEAD \
+  --fail-on high
+```
+
+Supported thresholds are `low`, `medium`, `high`, and `critical`. The gate uses the highest severity among analyzed files. Skipped files do not trigger semantic failure, and a run with no comparable files exits calmly unless an operational error occurred.
+
+Operational errors remain distinct from semantic gate failures.
+
+## Repository configuration
+
+Create `semantic-delta.yml` in the repository being analyzed:
 
 ```yaml
 fail_on: high
@@ -116,109 +135,118 @@ ignore:
   - README.md
 ```
 
-The CLI `--fail-on` flag overrides `semantic-delta.yml` when both are present.
-The CLI `--before` and `--after` flags override `default_before_path` and `default_after_path`.
-The `include` and `ignore` lists are applied by local Git comparison mode. They do not change explicit `--before` / `--after` comparisons.
+Precedence and scope:
 
-## Local Git Comparison
+- CLI `--fail-on` overrides config `fail_on`.
+- CLI `--before` and `--after` override `default_before_path` and `default_after_path`.
+- `include` and `ignore` apply only to local Git comparison mode.
+- Explicit before/after comparisons are not filtered by Git path rules.
 
-Compare changed SQL files between two local Git refs without modifying the repository or calling GitHub:
+## Compare two definitions directly
 
-```bash
-npm run compare -- --changed-from main --changed-to HEAD
-```
-
-`--changed-from` is required. `--changed-to` defaults to `HEAD`, and `--repo` defaults to the current directory. To inspect another local repository:
+Semantic Delta also supports explicit pairs and bundled examples:
 
 ```bash
-npm run compare -- --changed-from origin/main --repo ../analytics-repo
+# SQL files
+pnpm run compare -- --file-a ./query-a.sql --file-b ./query-b.sql
+
+# PR-style before/after preview
+pnpm run compare -- \
+  --before ./examples/pr-before.sql \
+  --after ./examples/pr-after.sql \
+  --pr
+
+# Inline SQL
+pnpm run compare -- \
+  --query-a "SELECT COUNT(DISTINCT user_id) FROM events" \
+  --query-b "SELECT COUNT(*) FROM events"
+
+# Bundled low-risk example
+pnpm run compare -- --example same-de-users-formatting --pr
 ```
 
-Git mode discovers changed-file statuses, applies `semantic-delta.yml` path rules, loads before/after contents from the selected refs, and produces one aggregate report. When no `include` rules are configured, only `**/*.sql` files are candidates. `ignore` rules take precedence over `include` rules.
+JSON metric definitions may optionally add `metric_name`, `description`, `team_context`, and `intended_use` alongside the SQL query.
 
-Every discovered row receives a visible disposition. Modified files and complete renames can be analyzed. Added files, deleted files, unknown statuses, filtered paths, malformed Git rows, and content-loading failures are reported as skipped with a reason. Renames are filtered using their new path while the old path remains visible and is used for base-ref content.
+## What the analyzer looks for
 
-Preview a concise simulated PR-style aggregate comment:
+Semantic Delta currently reasons about signals such as:
 
-```bash
-npm run compare -- --changed-from origin/main --changed-to HEAD --pr
+| Change | Example semantic risk |
+| --- | --- |
+| Aggregation | Unique users become event rows |
+| Population filter | Paid users become all users |
+| Time window | 7-day activity becomes 30-day activity |
+| Join behavior | `LEFT JOIN` becomes `INNER JOIN` |
+| Source table | Orders become payments |
+| Geography or cohort | German users become US users |
+| Exclusion filter | Internal, test, or deleted users enter the metric |
+| Reporting grain | Daily counts become monthly counts |
+
+Formatting-only or semantically equivalent changes should remain low risk, reducing alert fatigue and making higher-severity findings more useful.
+
+## Safe local Git boundary
+
+Git integration is deliberately conservative:
+
+- subprocesses use argument arrays with no shell interpolation;
+- raw refs are resolved before content loading;
+- only repository-verified commit objects reach `git show`;
+- discovery uses NUL-delimited `git diff --name-status -z` output;
+- Unicode, spaces, tabs, newlines, quotes, backslashes, and rename paths are preserved exactly;
+- malformed framing fails transactionally instead of inventing record boundaries;
+- binary, NUL-containing, and invalid UTF-8 content never becomes fake SQL text;
+- public APIs cannot replace the trusted internal Git runner.
+
+See [Git discovery design](docs/design/git-discovery.md) for the detailed invariants.
+
+## Programmatic API
+
+The default package entry point includes the semantic engine plus Node.js Git discovery and comparison APIs:
+
+```ts
+import {
+  compareGitChanges,
+  compareMetricDefinitions,
+  compareSqlQueries,
+} from "semantic-delta-detector";
 ```
 
-This only prints text. It does not post a PR comment or call the GitHub API.
+Browser and extension consumers can import the semantic engine without Node.js filesystem or subprocess dependencies:
 
-Machine-readable output preserves analyzed files, skipped rows, warnings, refs, and summary counts:
-
-```bash
-npm run --silent compare -- --changed-from origin/main --format json
+```ts
+import {
+  compareMetricDefinitions,
+  compareSqlQueries,
+} from "semantic-delta-detector/core";
 ```
 
-Aggregate CI gating uses the highest risk among analyzed files:
+## GitHub Actions preview
 
-```bash
-npm run compare -- --changed-from origin/main --fail-on high
-```
+`.github/workflows/semantic-delta-preview.yml` runs tests, builds the project, and prints a simulated PR-style report in CI logs.
 
-Skipped added/deleted files do not fail the semantic gate, and a run with no comparable files exits successfully unless Git or CLI validation itself fails.
+Current workflow scope:
 
-Git mode remains heuristic. It does not prove SQL equivalence, does not fully model complex SQL such as CTEs or subqueries, and does not yet assign semantic risk to newly added or deleted metrics.
+- pull-request runs are non-blocking and use the bundled demo SQL files;
+- manual runs can use explicit before/after paths or config defaults;
+- manual runs can demonstrate `fail_on` gating;
+- no GitHub API credentials or real PR-comment posting are used.
 
-## Low-Risk Example
-Semantic Delta should not warn on formatting-only changes. Formatting-only or semantically equivalent changes should stay low risk, which reduces alert fatigue and makes high-risk warnings more trustworthy.
+## VS Code extension
 
-```bash
-npm run compare -- --example same-de-users-formatting --pr
-```
+Run the same browser-safe semantic core directly in VS Code:
 
-```text
-🟢 LOW RISK
-No meaningful semantic change detected.
+[Ryukanchi/semantic-delta-extension](https://github.com/Ryukanchi/semantic-delta-extension)
 
-Impact: No significant business impact detected.
-Evidence:
-- No significant semantic differences detected.
-Recommendation: No action required beyond normal review.
-```
+## Current limitations
 
-This helps keep the tool useful as a reviewer instead of an alarm machine.
+- SQL understanding is heuristic; there is no full SQL AST parser.
+- Complex SQL such as CTEs and subqueries is only partially modeled.
+- Added and deleted metrics are observable but do not yet receive semantic risk.
+- Git mode compares committed refs, not uncommitted worktree or index changes.
+- The project does not post real pull-request comments.
 
-### GitHub Actions Preview
-A preview GitHub Actions workflow is included at `.github/workflows/semantic-delta-preview.yml`. It runs the local PR simulation and prints the PR-style output in CI logs. It does not comment on PRs or call the GitHub API.
+## Status
 
-Pull request runs are non-blocking by default and use the demo files:
-- `./examples/pr-before.sql`
-- `./examples/pr-after.sql`
+**Usable local Git comparison MVP with a browser-safe semantic core.**
 
-Manual workflow runs default to the same demo SQL files, so **Run workflow** succeeds out of the box. To use repo-level `semantic-delta.yml` path defaults, manually clear `before_path` and `after_path` in the workflow form:
-
-```yaml
-default_before_path: ./examples/pr-before.sql
-default_after_path: ./examples/pr-after.sql
-```
-
-Manual runs can also set `fail_on` to demonstrate gating. If manual `fail_on` is `none`, the workflow does not pass `--fail-on`; a configured `semantic-delta.yml` `fail_on` may still apply. Pull request preview runs remain non-blocking and do not let repo config gating fail PR checks yet.
-If no workflow paths are provided and no config path defaults exist, the CLI fails with its normal missing-input error.
-
-## 🔌 VS Code Extension
-Use semantic-delta-detector directly in VS Code through an extension that calls the same core comparison engine: https://github.com/Ryukanchi/semantic-delta-extension
-
-## 🧩 Features
-- Semantic risk detection for SQL metric changes
-- Optional metric metadata comparison
-- Similarity and risk scoring
-- Confidence and evidence reporting
-- Human-readable and JSON output
-- Tested comparison cases for core behavior
-
-## 🛣️ Roadmap
-- Improved SQL parsing
-- Richer semantic signals
-
-## 🧠 Philosophy
-- Not a SQL validator
-- Not a truth engine
-- Not a replacement for metric ownership
-- A semantic early warning system for metric drift
-
-## 📦 Status
-MVP heuristic detector.
-Core comparison logic is structured and tested; SQL understanding is intentionally heuristic and still evolving.
+The comparison engine, Git discovery boundary, aggregate reporting, configuration, JSON output, and optional gating are implemented and tested. SQL understanding remains intentionally heuristic and continues to evolve.
