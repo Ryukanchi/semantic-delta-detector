@@ -72,7 +72,7 @@ export function detectUnsupportedSqlConstructs(sql: string): UnsupportedSqlConst
   if (analyzeSqlStructure(sql).depthLimited) {
     constructs.push({
       construct: "scope_depth_limit",
-      label: "nested-query nesting depth limit",
+      label: "parser nesting depth limit",
       confidenceCap: "low",
     });
   }

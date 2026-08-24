@@ -207,3 +207,17 @@ test("excessive nested-query depth degrades safely", () => {
   assert.equal(result.confidence_level, "low");
   assert.ok(result.parser_limitations?.some((note) => /nesting depth/i.test(note)));
 });
+
+test("excessive Boolean nesting degrades safely", () => {
+  let predicate = "flag_80 = true";
+  for (let index = 0; index < 80; index += 1) {
+    predicate = `flag_${index} = true AND (${predicate})`;
+  }
+
+  const sql = `SELECT COUNT(*) FROM users WHERE ${predicate}`;
+  const result = compareSqlQueries(sql, sql);
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /nesting depth/i.test(note)));
+});

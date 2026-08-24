@@ -5,6 +5,7 @@ const SOURCE_BOUNDARY_WORDS = new Set([
   "cross", "full", "inner", "join", "left", "on", "outer", "right", "using",
 ]);
 const MAX_SCOPE_DEPTH = 12;
+const MAX_BOOLEAN_DEPTH = 32;
 
 export interface SqlAggregationSummary {
   functionName: string;
@@ -47,6 +48,7 @@ export interface SqlBooleanExpressionSummary {
   operators: Array<"and" | "or">;
   hasNegation: boolean;
   children: SqlBooleanExpressionSummary[];
+  depthLimited: boolean;
 }
 
 export interface SqlQueryScopeSummary {
@@ -573,6 +575,7 @@ function buildBooleanNode(
     operators: [kind, ...children.flatMap((child) => child.operators)],
     hasNegation: children.some((child) => child.hasNegation),
     children,
+    depthLimited: children.some((child) => child.depthLimited),
   };
 }
 
@@ -648,25 +651,44 @@ function negateBooleanNode(
     operators: child.operators,
     hasNegation: true,
     children: [child],
+    depthLimited: child.depthLimited,
   };
 }
 
-function parseBooleanExpression(input: string): SqlBooleanExpressionSummary | null {
+function parseBooleanExpression(
+  input: string,
+  depth = 0,
+): SqlBooleanExpressionSummary | null {
   const normalized = stripBalancedOuterParentheses(input);
   if (!normalized) return null;
+  if (depth > MAX_BOOLEAN_DEPTH) {
+    return {
+      kind: "predicate",
+      canonical: "predicate(" + normalized + ")",
+      predicates: [normalized],
+      operators: [],
+      hasNegation: false,
+      children: [],
+      depthLimited: true,
+    };
+  }
 
   const orParts = splitTopLevelBoolean(normalized, "or");
   if (orParts.length > 1) {
     return buildBooleanNode(
       "or",
-      orParts.map((part) => parseBooleanExpression(part)).filter(Boolean) as SqlBooleanExpressionSummary[],
+      orParts
+        .map((part) => parseBooleanExpression(part, depth + 1))
+        .filter(Boolean) as SqlBooleanExpressionSummary[],
     );
   }
   const andParts = splitTopLevelBoolean(normalized, "and");
   if (andParts.length > 1) {
     return buildBooleanNode(
       "and",
-      andParts.map((part) => parseBooleanExpression(part)).filter(Boolean) as SqlBooleanExpressionSummary[],
+      andParts
+        .map((part) => parseBooleanExpression(part, depth + 1))
+        .filter(Boolean) as SqlBooleanExpressionSummary[],
     );
   }
 
@@ -677,7 +699,7 @@ function parseBooleanExpression(input: string): SqlBooleanExpressionSummary | nu
     remainder = stripBalancedOuterParentheses(remainder.slice(3));
   }
   if (negations > 0) {
-    const child = parseBooleanExpression(remainder);
+    const child = parseBooleanExpression(remainder, depth + 1);
     if (!child) return null;
     if (negations % 2 === 0) return child;
     return negateBooleanNode(child);
@@ -690,6 +712,7 @@ function parseBooleanExpression(input: string): SqlBooleanExpressionSummary | nu
     operators: [],
     hasNegation: false,
     children: [],
+    depthLimited: false,
   };
 }
 
@@ -769,8 +792,9 @@ function findNextJoinBoundary(input: string, start: number): number {
 function extractJoinPredicates(
   fromClause: string,
   aliases: ReadonlyMap<string, string>,
-): string[] {
+): { predicates: string[]; depthLimited: boolean } {
   const predicates: string[] = [];
+  let depthLimited = false;
   let depth = 0;
   let quote: "'" | '"' | null = null;
   for (let index = 0; index < fromClause.length; index += 1) {
@@ -817,10 +841,13 @@ function extractJoinPredicates(
       .trim();
     const canonical = canonicalizeSqlExpression(rawCondition, aliases);
     const booleanExpression = parseBooleanExpression(canonical);
-    if (booleanExpression) predicates.push(booleanExpression.canonical);
+    if (booleanExpression) {
+      predicates.push(booleanExpression.canonical);
+      depthLimited ||= booleanExpression.depthLimited;
+    }
     index = Math.max(index, boundary - 1);
   }
-  return predicates;
+  return { predicates, depthLimited };
 }
 
 function extractCtePrefix(
@@ -1128,7 +1155,7 @@ function parseSqlScope(
     }
   }
 
-  const joinPredicates = extractJoinPredicates(fromClause, aliases);
+  const joinAnalysis = extractJoinPredicates(fromClause, aliases);
 
   const processedSelectExpressions: string[] = [];
   const selectSubqueries: SqlSubquerySummary[] = [];
@@ -1183,6 +1210,12 @@ function parseSqlScope(
           ",",
         )
       : [];
+  const canonicalWhereClause = whereClause
+    ? canonicalizeSqlExpression(processedWhere.canonicalFragment, aliases)
+    : null;
+  const booleanExpression = canonicalWhereClause
+    ? parseBooleanExpression(canonicalWhereClause)
+    : null;
 
   return {
     kind,
@@ -1202,23 +1235,17 @@ function parseSqlScope(
     canonicalGroupByExpressions: groupByExpressions.map((expression) =>
       canonicalizeSqlExpression(expression, aliases),
     ),
-    joinPredicates,
+    joinPredicates: joinAnalysis.predicates,
     whereClause,
-    canonicalWhereClause: whereClause
-      ? canonicalizeSqlExpression(processedWhere.canonicalFragment, aliases)
-      : null,
+    canonicalWhereClause,
     ctes: ctePrefix.ctes,
     subqueries: [...selectSubqueries, ...processedWhere.subqueries],
     cases: extractCaseSummaries(
       [...processedSelectExpressions, ...(whereClause ? [processedWhere.canonicalFragment] : [])],
       aliases,
     ),
-    booleanExpression: whereClause
-      ? parseBooleanExpression(
-          canonicalizeSqlExpression(processedWhere.canonicalFragment, aliases),
-        )
-      : null,
-    depthLimited: false,
+    booleanExpression,
+    depthLimited: Boolean(booleanExpression?.depthLimited || joinAnalysis.depthLimited),
   };
 }
 
