@@ -1,88 +1,12 @@
 import { ParsedSqlQuery, SqlJoinClause, WhereBooleanOperator } from "../types.js";
+import {
+  analyzeSqlStructure,
+  cacheSqlStructure,
+  canonicalizeSqlExpression,
+  stripSqlComments,
+} from "./sqlStructure.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
-
-function stripSqlComments(input: string): string {
-  let result = "";
-  let index = 0;
-  let state: "normal" | "line-comment" | "block-comment" | "single-quote" | "double-quote" =
-    "normal";
-
-  while (index < input.length) {
-    const current = input[index];
-    const next = input[index + 1];
-
-    if (state === "line-comment") {
-      if (current === "\n" || current === "\r") {
-        result += current;
-        state = "normal";
-      }
-      index += 1;
-      continue;
-    }
-
-    if (state === "block-comment") {
-      if (current === "*" && next === "/") {
-        state = "normal";
-        index += 2;
-      } else {
-        index += 1;
-      }
-      continue;
-    }
-
-    result += current;
-
-    if (state === "single-quote") {
-      if (current === "'" && next === "'") {
-        result += next;
-        index += 2;
-        continue;
-      }
-      if (current === "'") {
-        state = "normal";
-      }
-      index += 1;
-      continue;
-    }
-
-    if (state === "double-quote") {
-      if (current === '"' && next === '"') {
-        result += next;
-        index += 2;
-        continue;
-      }
-      if (current === '"') {
-        state = "normal";
-      }
-      index += 1;
-      continue;
-    }
-
-    if (current === "-" && next === "-") {
-      result = result.slice(0, -1);
-      state = "line-comment";
-      index += 2;
-      continue;
-    }
-
-    if (current === "/" && next === "*") {
-      result = result.slice(0, -1);
-      state = "block-comment";
-      index += 2;
-      continue;
-    }
-
-    if (current === "'") {
-      state = "single-quote";
-    } else if (current === '"') {
-      state = "double-quote";
-    }
-    index += 1;
-  }
-
-  return result;
-}
 
 export function hasAnalyzableSqlContent(rawQuery: string): boolean {
   return stripSqlComments(rawQuery).replace(/;/g, "").trim().length > 0;
@@ -295,20 +219,26 @@ function inferMetricName(query: string, tables: string[], conditions: string[]):
 }
 
 export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
+  const structure = analyzeSqlStructure(rawQuery);
   const normalizedQuery = normalizeWhitespace(rawQuery);
   const tables = extractTables(normalizedQuery);
   const joinClauses = extractJoinClauses(normalizedQuery);
-  const selectedExpressions = extractSelectExpressions(normalizedQuery);
+  const selectedExpressions =
+    structure.root.selectExpressions.length > 0
+      ? structure.root.selectExpressions
+      : extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
   const whereClause = extractWhereClause(normalizedQuery);
   const whereOperators = extractWhereOperators(whereClause);
   const groupByExpressions = extractGroupByExpressions(normalizedQuery);
-  const conditions = splitConditions(whereClause);
+  const conditions = splitConditions(whereClause).map((condition) =>
+    canonicalizeSqlExpression(condition, structure.root.aliases),
+  );
   const timeWindows = extractTimeWindows(conditions);
   const filters = extractFilters(conditions);
   const metricName = inferMetricName(normalizedQuery, tables, conditions);
 
-  return {
+  const parsedQuery: ParsedSqlQuery = {
     rawQuery,
     normalizedQuery,
     tables,
@@ -324,4 +254,6 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
     timeWindows,
     conditions,
   };
+  cacheSqlStructure(parsedQuery, structure);
+  return parsedQuery;
 }

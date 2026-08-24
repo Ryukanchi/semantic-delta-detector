@@ -5,6 +5,7 @@ import {
   QuerySemanticProfile,
   RiskLevel,
 } from "../types.js";
+import { getSqlStructure } from "../parser/sqlStructure.js";
 
 function containsAny(text: string, keywords: string[]): boolean {
   const lower = text.toLowerCase();
@@ -16,11 +17,12 @@ function containsPattern(text: string, pattern: RegExp): boolean {
 }
 
 function findSignal(query: ParsedSqlQuery): string[] {
+  const structure = getSqlStructure(query);
   return [
     ...query.tables,
     ...query.filters,
     ...query.timeWindows,
-    ...query.selectedExpressions,
+    ...structure.root.canonicalSelectExpressions,
   ].map((value) => value.toLowerCase());
 }
 
@@ -281,12 +283,16 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
   const profileB = buildSemanticProfile(queryB);
   let score = 100;
 
-  if (queryA.aggregation !== queryB.aggregation) {
+  const aggregationSetA = getSqlStructure(queryA).root.aggregations
+    .map((aggregation) => aggregation.canonical)
+    .sort()
+    .join(" | ");
+  const aggregationSetB = getSqlStructure(queryB).root.aggregations
+    .map((aggregation) => aggregation.canonical)
+    .sort()
+    .join(" | ");
+  if (aggregationSetA !== aggregationSetB) {
     score -= 25;
-  }
-
-  if (queryA.aggregationDistinctTarget !== queryB.aggregationDistinctTarget) {
-    score -= 10;
   }
 
   const sameTable = queryA.tables.some((table) => queryB.tables.includes(table));

@@ -3,6 +3,10 @@ import {
   tokenizeSql,
 } from "../parser/sqlTokenizer.js";
 import {
+  getSqlStructure,
+  type SqlAggregationSummary,
+} from "../parser/sqlStructure.js";
+import {
   analyzeParserLimitations,
   type ParserConfidenceCap,
 } from "../parser/unsupportedConstructs.js";
@@ -117,16 +121,23 @@ function compareAggregation(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
 ): DetectedDifference | null {
-  if (
-    queryA.aggregation === queryB.aggregation &&
-    queryA.aggregationDistinctTarget === queryB.aggregationDistinctTarget
-  ) {
+  const aggregationsA = getSqlStructure(queryA).root.aggregations;
+  const aggregationsB = getSqlStructure(queryB).root.aggregations;
+  const canonicalA = aggregationsA.map((item) => item.canonical).sort();
+  const canonicalB = aggregationsB.map((item) => item.canonical).sort();
+
+  if (canonicalA.join("|") === canonicalB.join("|")) {
     return null;
   }
 
   return {
     category: "aggregation_mismatch",
-    description: buildAggregationDifferenceDescription(queryA, queryB),
+    description: buildAggregationDifferenceDescription(
+      queryA,
+      queryB,
+      aggregationsA,
+      aggregationsB,
+    ),
     impact: "high",
   };
 }
@@ -550,8 +561,15 @@ function describeDistinctUserRowCountChange(
 function buildAggregationDifferenceDescription(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  aggregationsA: SqlAggregationSummary[],
+  aggregationsB: SqlAggregationSummary[],
 ): string {
-  const baseDescription = `Aggregation changed from ${formatAggregation(queryA)} to ${formatAggregation(queryB)}. Query A uses ${queryA.aggregation || "no aggregation"} over ${queryA.aggregationDistinctTarget || "*"}, while Query B uses ${queryB.aggregation || "no aggregation"} over ${queryB.aggregationDistinctTarget || "*"}.`;
+  const displayA = aggregationsA.map((item) => item.display);
+  const displayB = aggregationsB.map((item) => item.display);
+  const baseDescription =
+    aggregationsA.length <= 1 && aggregationsB.length <= 1
+      ? `Aggregation changed from ${displayA[0] ?? formatAggregation(queryA)} to ${displayB[0] ?? formatAggregation(queryB)}. Query A uses ${aggregationsA[0]?.functionName ?? queryA.aggregation ?? "no aggregation"} over ${aggregationsA[0]?.argument ?? queryA.aggregationDistinctTarget ?? "*"}, while Query B uses ${aggregationsB[0]?.functionName ?? queryB.aggregation ?? "no aggregation"} over ${aggregationsB[0]?.argument ?? queryB.aggregationDistinctTarget ?? "*"}.`
+      : `Aggregation set changed. Query A computes ${displayA.join(", ") || "no aggregation"}, while Query B computes ${displayB.join(", ") || "no aggregation"}. All aggregate expressions are compared regardless of SELECT order.`;
 
   if (isDistinctUserVsRowCountChange(queryA, queryB)) {
     return `${baseDescription} ${describeDistinctUserRowCountChange(queryA, queryB)} This changes the metric from unique users to event rows; repeated events by the same user can make COUNT(*) larger than COUNT(DISTINCT user_id).`;
