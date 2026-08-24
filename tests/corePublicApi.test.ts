@@ -110,6 +110,10 @@ test("package metadata exposes the core runtime and declarations", () => {
     types: "./dist/core.d.ts",
     import: "./dist/core.js",
   });
+  assert.deepEqual(packageJson.exports["./postgresql"], {
+    types: "./dist/postgresql.d.ts",
+    import: "./dist/postgresql.js",
+  });
   assert.equal(
     fileURLToPath(import.meta.resolve("semantic-delta-detector/core")),
     resolve(projectRoot, "dist/core.js"),
@@ -124,6 +128,8 @@ test("core dependency graph excludes Node built-ins and Git runtime modules", ()
 
   assert.deepEqual([...graph.externalSpecifiers], []);
   assert.ok(modulePaths.includes("analyzer/differenceEngine.ts"));
+  assert.equal(modulePaths.includes("parser/nodeSqlParserAdapter.ts"), false);
+  assert.equal(modulePaths.includes("internal/enhancedSqlComparisonRuntime.ts"), false);
 
   for (const modulePath of modulePaths) {
     assert.doesNotMatch(
