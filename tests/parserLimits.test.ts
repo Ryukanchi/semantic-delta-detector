@@ -86,6 +86,34 @@ test("IN (SELECT ...) subquery produces an explicit limited-confidence note", ()
   assert.match(result.parser_limitations[0], /IN \(SELECT \.\.\.\) subquery/);
 });
 
+test("a scalar subquery caps confidence at low", () => {
+  assert.deepEqual(
+    detectUnsupportedSqlConstructs(
+      "SELECT (SELECT AVG(amount) FROM orders) AS benchmark FROM users",
+    ).map((item) => item.construct),
+    ["scalar_subquery"],
+  );
+
+  const result = compareMetricDefinitions(
+    {
+      query: "SELECT (SELECT AVG(amount) FROM orders) AS benchmark FROM users",
+      metric_name: "spend_benchmark",
+      description: "Average spend benchmark",
+      team_context: "analytics",
+    },
+    {
+      query: "SELECT (SELECT AVG(amount) FROM payments) AS benchmark FROM users",
+      metric_name: "spend_benchmark",
+      description: "Average spend benchmark",
+      team_context: "analytics",
+    },
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /scalar subquery/i.test(note)));
+});
+
 test("simple queries do not produce a parser limitation note", () => {
   const result = compareSqlQueries(
     "SELECT COUNT(*) FROM users WHERE country = 'DE'",

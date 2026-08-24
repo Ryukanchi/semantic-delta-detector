@@ -1,4 +1,7 @@
-import { analyzeSqlStructure } from "./sqlStructure.js";
+import {
+  analyzeSqlStructure,
+  getReachableNestedScopes,
+} from "./sqlStructure.js";
 
 export type UnsupportedSqlConstructKind =
   | "cte"
@@ -6,6 +9,7 @@ export type UnsupportedSqlConstructKind =
   | "derived_table_subquery"
   | "in_subquery"
   | "exists_subquery"
+  | "scalar_subquery"
   | "scope_depth_limit";
 
 export type ParserConfidenceCap = "low" | "medium";
@@ -61,6 +65,7 @@ const constructChecks: Array<{
 
 export function detectUnsupportedSqlConstructs(sql: string): UnsupportedSqlConstruct[] {
   const normalized = sql.replace(/\s+/g, " ");
+  const structure = analyzeSqlStructure(sql);
   const constructs = constructChecks
     .filter((check) => check.pattern.test(normalized))
     .map((check) => ({
@@ -69,7 +74,19 @@ export function detectUnsupportedSqlConstructs(sql: string): UnsupportedSqlConst
       confidenceCap: check.confidenceCap,
     }));
 
-  if (analyzeSqlStructure(sql).depthLimited) {
+  if (
+    getReachableNestedScopes(structure.root).some(
+      (nested) => nested.scope.kind === "subquery" && nested.operator === "scalar",
+    )
+  ) {
+    constructs.push({
+      construct: "scalar_subquery",
+      label: "scalar subquery",
+      confidenceCap: "low",
+    });
+  }
+
+  if (structure.depthLimited) {
     constructs.push({
       construct: "scope_depth_limit",
       label: "parser nesting depth limit",
