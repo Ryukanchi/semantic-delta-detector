@@ -2,7 +2,10 @@ import {
   hasAnalyzableSqlContent,
   tokenizeSql,
 } from "../parser/sqlTokenizer.js";
-import { buildParserLimitationNotes } from "../parser/unsupportedConstructs.js";
+import {
+  analyzeParserLimitations,
+  type ParserConfidenceCap,
+} from "../parser/unsupportedConstructs.js";
 import {
   buildSemanticProfile,
   estimateBaseSimilarity,
@@ -1019,6 +1022,21 @@ function inferConfidenceLevel(
   return "medium";
 }
 
+function applyParserConfidenceCap(
+  confidenceLevel: ConfidenceLevel,
+  confidenceCap: ParserConfidenceCap | undefined,
+): ConfidenceLevel {
+  if (!confidenceCap || confidenceLevel === "low") {
+    return confidenceLevel;
+  }
+
+  if (confidenceCap === "low") {
+    return "low";
+  }
+
+  return confidenceLevel === "high" ? "medium" : confidenceLevel;
+}
+
 function ensureRiskCoversDetectedDifferences(
   riskLevel: RiskLevel,
   differences: DetectedDifference[],
@@ -1579,11 +1597,15 @@ export function compareMetricDefinitions(
     profileB,
     detectedDifferences,
   );
-  const confidenceLevel = inferConfidenceLevel(evidenceSources, detectedDifferences);
-  const parserLimitations = buildParserLimitationNotes(
+  const parserAnalysis = analyzeParserLimitations(
     normalizedInputA.query,
     normalizedInputB.query,
   );
+  const confidenceLevel = applyParserConfidenceCap(
+    inferConfidenceLevel(evidenceSources, detectedDifferences),
+    parserAnalysis.confidenceCap,
+  );
+  const parserLimitations = parserAnalysis.notes;
 
   const result: SemanticComparisonResult = {
     metric_name_a: getDisplayMetricName(normalizedInputA, parsedA),
