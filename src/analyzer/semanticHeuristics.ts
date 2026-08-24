@@ -6,6 +6,7 @@ import {
   RiskLevel,
 } from "../types.js";
 import {
+  getReachableNestedSignature,
   getReachableSemanticSignals,
   getSqlStructure,
 } from "../parser/sqlStructure.js";
@@ -283,18 +284,44 @@ export function normalizeText(input: string | undefined): string | null {
 export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSqlQuery): number {
   const profileA = buildSemanticProfile(queryA);
   const profileB = buildSemanticProfile(queryB);
+  const structureA = getSqlStructure(queryA);
+  const structureB = getSqlStructure(queryB);
   let score = 100;
 
-  const aggregationSetA = getSqlStructure(queryA).root.aggregations
+  const aggregationSetA = structureA.root.aggregations
     .map((aggregation) => aggregation.canonical)
     .sort()
     .join(" | ");
-  const aggregationSetB = getSqlStructure(queryB).root.aggregations
+  const aggregationSetB = structureB.root.aggregations
     .map((aggregation) => aggregation.canonical)
     .sort()
     .join(" | ");
   if (aggregationSetA !== aggregationSetB) {
     score -= 25;
+  }
+
+  const nestedSignatureA = getReachableNestedSignature(structureA.root);
+  const nestedSignatureB = getReachableNestedSignature(structureB.root);
+  if (nestedSignatureA !== nestedSignatureB) {
+    score -= 15;
+  }
+
+  const caseSetA = structureA.root.cases
+    .map((item) => item.canonical)
+    .sort()
+    .join("|");
+  const caseSetB = structureB.root.cases
+    .map((item) => item.canonical)
+    .sort()
+    .join("|");
+  if (caseSetA !== caseSetB) {
+    score -= 20;
+  }
+
+  const joinPredicatesA = [...structureA.root.joinPredicates].sort().join("|");
+  const joinPredicatesB = [...structureB.root.joinPredicates].sort().join("|");
+  if (joinPredicatesA !== joinPredicatesB) {
+    score -= 20;
   }
 
   const sameTable = queryA.tables.some((table) => queryB.tables.includes(table));

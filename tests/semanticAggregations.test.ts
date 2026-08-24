@@ -68,3 +68,17 @@ test("changing one aggregation remains visible when another stays equal", () => 
     ),
   );
 });
+
+test("reordering the same GROUP BY set is equivalent", () => {
+  const result = compareSqlQueries(
+    `SELECT country, plan, COUNT(*)
+     FROM users
+     GROUP BY country, plan`,
+    `SELECT country, plan, COUNT(*)
+     FROM users
+     GROUP BY plan, country`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.detected_differences.length, 0);
+});

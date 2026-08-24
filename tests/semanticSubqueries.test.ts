@@ -130,3 +130,46 @@ test("aggregation changes inside a subquery are compared in that scope", () => {
     ),
   );
 });
+
+test("same-table correlated aliases remain equivalent across scopes", () => {
+  const result = compareSqlQueries(
+    `SELECT COUNT(*) FROM users employee
+     WHERE EXISTS (
+       SELECT 1 FROM users manager
+       WHERE manager.id = employee.manager_id
+     )`,
+    `SELECT COUNT(*) FROM users report
+     WHERE EXISTS (
+       SELECT 1 FROM users lead
+       WHERE lead.id = report.manager_id
+     )`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.detected_differences.length, 0);
+});
+
+test("same-table inner and outer column references do not collapse", () => {
+  const result = compareSqlQueries(
+    `SELECT COUNT(*) FROM users employee
+     WHERE EXISTS (
+       SELECT 1 FROM users manager
+       WHERE manager.id = employee.manager_id
+     )`,
+    `SELECT COUNT(*) FROM users employee
+     WHERE EXISTS (
+       SELECT 1 FROM users manager
+       WHERE manager.id = manager.manager_id
+     )`,
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "filter_logic_mismatch" &&
+        /correlated/i.test(difference.description) &&
+        /uncorrelated/i.test(difference.description),
+    ),
+  );
+});

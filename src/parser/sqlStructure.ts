@@ -46,6 +46,7 @@ export interface SqlBooleanExpressionSummary {
   predicates: string[];
   operators: Array<"and" | "or">;
   hasNegation: boolean;
+  children: SqlBooleanExpressionSummary[];
 }
 
 export interface SqlQueryScopeSummary {
@@ -57,6 +58,9 @@ export interface SqlQueryScopeSummary {
   sources: SqlSourceSummary[];
   aliases: ReadonlyMap<string, string>;
   aggregations: SqlAggregationSummary[];
+  groupByExpressions: string[];
+  canonicalGroupByExpressions: string[];
+  joinPredicates: string[];
   whereClause: string | null;
   canonicalWhereClause: string | null;
   ctes: SqlCteSummary[];
@@ -74,6 +78,7 @@ export interface SqlStructureSummary {
 export interface ReachableNestedScope {
   label: string;
   operator: SqlSubquerySummary["operator"] | null;
+  correlated: boolean;
   scope: SqlQueryScopeSummary;
 }
 
@@ -272,14 +277,39 @@ function normalizeJoinType(value: string): SqlJoinClause["type"] {
 }
 
 function stripOutputAlias(expression: string): string {
-  return expression.replace(/\s+as\s+[a-zA-Z_][a-zA-Z0-9_$]*\s*$/i, "").trim();
+  const explicit = expression.replace(
+    /\s+as\s+[a-zA-Z_][a-zA-Z0-9_$]*\s*$/i,
+    "",
+  );
+  if (explicit !== expression) return explicit.trim();
+
+  const implicit = expression.match(/^(.*\S)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\s*$/);
+  if (!implicit) return expression.trim();
+  const candidateExpression = implicit[1].trim();
+  const candidateAlias = implicit[2].toLowerCase();
+  const nonAliasKeywords = new Set([
+    "and", "asc", "desc", "distinct", "else", "end", "from", "nulls", "or",
+    "then", "when",
+  ]);
+  if (
+    nonAliasKeywords.has(candidateAlias) ||
+    /(?:^|\s)distinct$/i.test(candidateExpression) ||
+    /[+\-*/%<>=.,]$/.test(candidateExpression)
+  ) {
+    return expression.trim();
+  }
+  return candidateExpression;
 }
 
 export function canonicalizeSqlExpression(
   expression: string,
   aliases: ReadonlyMap<string, string>,
+  removeOutputAlias = false,
 ): string {
-  const withoutAlias = stripOutputAlias(normalizeWhitespace(expression));
+  const normalizedExpression = normalizeWhitespace(expression);
+  const withoutAlias = removeOutputAlias
+    ? stripOutputAlias(normalizedExpression)
+    : normalizedExpression;
   const parts = withoutAlias.split(/('(?:''|[^'])*')/g);
   const sourceCount = new Set(aliases.values()).size;
   return parts
@@ -542,6 +572,82 @@ function buildBooleanNode(
     predicates: [...new Set(children.flatMap((child) => child.predicates))].sort(),
     operators: [kind, ...children.flatMap((child) => child.operators)],
     hasNegation: children.some((child) => child.hasNegation),
+    children,
+  };
+}
+
+function normalizeCommutativeComparison(input: string): string {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      quote = current;
+      continue;
+    }
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+    if (current === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0) continue;
+
+    const twoCharacterOperator = input.slice(index, index + 2);
+    const isEquality =
+      current === "=" &&
+      input[index - 1] !== "<" &&
+      input[index - 1] !== ">" &&
+      input[index - 1] !== "!" &&
+      next !== "=";
+    if (!isEquality && twoCharacterOperator !== "<>" && twoCharacterOperator !== "!=") {
+      continue;
+    }
+
+    const operatorLength = isEquality ? 1 : 2;
+    const left = normalizeWhitespace(input.slice(0, index));
+    const right = normalizeWhitespace(input.slice(index + operatorLength));
+    if (!left || !right) return input;
+    const operandRank = (operand: string): number =>
+      /^[a-z_][a-z0-9_$.#]*$/i.test(operand) &&
+      !/^(?:false|null|true)$/i.test(operand)
+        ? 0
+        : 1;
+    const operands = [left, right].sort(
+      (a, b) => operandRank(a) - operandRank(b) || a.localeCompare(b),
+    );
+    return operands[0] + " " + (isEquality ? "=" : "!=") + " " + operands[1];
+  }
+  return input;
+}
+
+function negateBooleanNode(
+  child: SqlBooleanExpressionSummary,
+): SqlBooleanExpressionSummary {
+  if (child.kind === "not") {
+    return child.children[0] ?? child;
+  }
+  if (child.kind === "and" || child.kind === "or") {
+    return buildBooleanNode(
+      child.kind === "and" ? "or" : "and",
+      child.children.map((nested) => negateBooleanNode(nested)),
+    );
+  }
+  return {
+    kind: "not",
+    canonical: "not(" + child.canonical + ")",
+    predicates: child.predicates,
+    operators: child.operators,
+    hasNegation: true,
+    children: [child],
   };
 }
 
@@ -574,21 +680,16 @@ function parseBooleanExpression(input: string): SqlBooleanExpressionSummary | nu
     const child = parseBooleanExpression(remainder);
     if (!child) return null;
     if (negations % 2 === 0) return child;
-    return {
-      kind: "not",
-      canonical: "not(" + child.canonical + ")",
-      predicates: child.predicates,
-      operators: child.operators,
-      hasNegation: true,
-    };
+    return negateBooleanNode(child);
   }
 
   return {
     kind: "predicate",
-    canonical: "predicate(" + normalized + ")",
-    predicates: [normalized],
+    canonical: "predicate(" + normalizeCommutativeComparison(normalized) + ")",
+    predicates: [normalizeCommutativeComparison(normalized)],
     operators: [],
     hasNegation: false,
+    children: [],
   };
 }
 
@@ -643,6 +744,83 @@ function getClauseEnd(sql: string, fromIndex: number): number {
     .map((keyword) => findTopLevelKeyword(sql, keyword, fromIndex))
     .filter((index) => index >= 0);
   return boundaries.length > 0 ? Math.min(...boundaries) : sql.length;
+}
+
+function findNextJoinBoundary(input: string, start: number): number {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = start; index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') quote = current;
+    else if (current === "(") depth += 1;
+    else if (current === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0 && current === ",") return index;
+    else if (depth === 0 && matchesKeyword(input, index, "join")) return index;
+  }
+  return input.length;
+}
+
+function extractJoinPredicates(
+  fromClause: string,
+  aliases: ReadonlyMap<string, string>,
+): string[] {
+  const predicates: string[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < fromClause.length; index += 1) {
+    const current = fromClause[index];
+    const next = fromClause[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      quote = current;
+      continue;
+    }
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+    if (current === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0) continue;
+
+    if (matchesKeyword(fromClause, index, "using")) {
+      const openingIndex = skipWhitespace(fromClause, index + 5);
+      if (fromClause[openingIndex] !== "(") continue;
+      const closingIndex = findMatchingParenthesis(fromClause, openingIndex);
+      if (closingIndex < 0) continue;
+      const fields = splitTopLevel(fromClause.slice(openingIndex + 1, closingIndex), ",")
+        .map((field) => canonicalizeSqlExpression(field, aliases))
+        .sort();
+      predicates.push("using(" + fields.join(",") + ")");
+      index = closingIndex;
+      continue;
+    }
+
+    if (!matchesKeyword(fromClause, index, "on")) continue;
+    const conditionStart = skipWhitespace(fromClause, index + 2);
+    const boundary = findNextJoinBoundary(fromClause, conditionStart);
+    const rawCondition = fromClause
+      .slice(conditionStart, boundary)
+      .replace(/\s+(?:(?:left|right|full|inner|cross)(?:\s+outer)?)\s*$/i, "")
+      .trim();
+    const canonical = canonicalizeSqlExpression(rawCondition, aliases);
+    const booleanExpression = parseBooleanExpression(canonical);
+    if (booleanExpression) predicates.push(booleanExpression.canonical);
+    index = Math.max(index, boundary - 1);
+  }
+  return predicates;
 }
 
 function extractCtePrefix(
@@ -889,6 +1067,9 @@ function emptyScope(
     sources: [],
     aliases: new Map(),
     aggregations: [],
+    groupByExpressions: [],
+    canonicalGroupByExpressions: [],
+    joinPredicates: [],
     whereClause: null,
     canonicalWhereClause: null,
     ctes: [],
@@ -931,10 +1112,23 @@ function parseSqlScope(
   );
   const aliases = new Map(inheritedAliases);
   for (const source of sources) {
-    const resolvedName = source.kind === "table" ? source.name : source.kind + ":" + source.name;
+    const baseResolvedName =
+      source.kind === "table" ? source.name : source.kind + ":" + source.name;
+    const existingSourceNames = new Set(aliases.values());
+    let sourceInstance = 1;
+    let resolvedName = baseResolvedName;
+    while (existingSourceNames.has(resolvedName)) {
+      sourceInstance += 1;
+      resolvedName = baseResolvedName + "#" + sourceInstance;
+    }
     aliases.set(source.alias, resolvedName);
-    aliases.set(source.name.split(".").at(-1) ?? source.name, resolvedName);
+    const baseQualifier = source.name.split(".").at(-1) ?? source.name;
+    if (source.alias === baseQualifier || !aliases.has(baseQualifier)) {
+      aliases.set(baseQualifier, resolvedName);
+    }
   }
+
+  const joinPredicates = extractJoinPredicates(fromClause, aliases);
 
   const processedSelectExpressions: string[] = [];
   const selectSubqueries: SqlSubquerySummary[] = [];
@@ -976,6 +1170,19 @@ function parseSqlScope(
     havingIndex >= 0
       ? normalizeWhitespace(mainSql.slice(havingIndex + 6, getClauseEnd(mainSql, havingIndex + 6)))
       : null;
+  const groupIndex = findTopLevelKeyword(
+    mainSql,
+    "group",
+    fromIndex >= 0 ? fromIndex + 4 : 0,
+  );
+  const byIndex = groupIndex >= 0 ? skipWhitespace(mainSql, groupIndex + 5) : -1;
+  const groupByExpressions =
+    byIndex >= 0 && matchesKeyword(mainSql, byIndex, "by")
+      ? splitTopLevel(
+          mainSql.slice(byIndex + 2, getClauseEnd(mainSql, byIndex + 2)),
+          ",",
+        )
+      : [];
 
   return {
     kind,
@@ -983,7 +1190,7 @@ function parseSqlScope(
     sql: mainSql,
     selectExpressions,
     canonicalSelectExpressions: processedSelectExpressions.map((expression) =>
-      canonicalizeSqlExpression(expression, aliases),
+      canonicalizeSqlExpression(expression, aliases, true),
     ),
     sources,
     aliases,
@@ -991,6 +1198,11 @@ function parseSqlScope(
       [...processedSelectExpressions, ...(havingClause ? [havingClause] : [])],
       aliases,
     ),
+    groupByExpressions,
+    canonicalGroupByExpressions: groupByExpressions.map((expression) =>
+      canonicalizeSqlExpression(expression, aliases),
+    ),
+    joinPredicates,
     whereClause,
     canonicalWhereClause: whereClause
       ? canonicalizeSqlExpression(processedWhere.canonicalFragment, aliases)
@@ -1045,12 +1257,18 @@ export function getReachableNestedScopes(root: SqlQueryScopeSummary): ReachableN
       if (!source.scope || seen.has(source.scope)) continue;
       seen.add(source.scope);
       if (source.kind === "cte") {
-        nested.push({ label: "CTE " + source.name, operator: null, scope: source.scope });
+        nested.push({
+          label: "CTE " + source.name,
+          operator: null,
+          correlated: false,
+          scope: source.scope,
+        });
       } else {
         derivedIndex += 1;
         nested.push({
           label: "derived-table subquery #" + derivedIndex,
           operator: null,
+          correlated: false,
           scope: source.scope,
         });
       }
@@ -1069,6 +1287,7 @@ export function getReachableNestedScopes(root: SqlQueryScopeSummary): ReachableN
       nested.push({
         label: label + " #" + subqueryIndex,
         operator: subquery.operator,
+        correlated: subquery.correlated,
         scope: subquery.scope,
       });
       visit(subquery.scope);
@@ -1076,6 +1295,35 @@ export function getReachableNestedScopes(root: SqlQueryScopeSummary): ReachableN
   };
   visit(root);
   return nested;
+}
+
+function getLocalScopeSignature(scope: SqlQueryScopeSummary): string {
+  const tables = getDirectBaseTables(scope).sort().join(",");
+  const selections = [...scope.canonicalSelectExpressions].sort().join(",");
+  const aggregations = scope.aggregations
+    .map((aggregation) => aggregation.canonical)
+    .sort()
+    .join(",");
+  const cases = scope.cases.map((item) => item.canonical).sort().join(",");
+  const groupBy = [...scope.canonicalGroupByExpressions].sort().join(",");
+  const joins = [...scope.joinPredicates].sort().join(",");
+  return [
+    "tables=" + tables,
+    "select=" + selections,
+    "aggregations=" + aggregations,
+    "cases=" + cases,
+    "group=" + groupBy,
+    "joins=" + joins,
+    "filter=" + (scope.booleanExpression?.canonical ?? scope.canonicalWhereClause ?? ""),
+  ].join(";");
+}
+
+export function getReachableNestedSignature(root: SqlQueryScopeSummary): string {
+  return getReachableNestedScopes(root)
+    .map((nested) =>
+      [nested.operator ?? "scope", getLocalScopeSignature(nested.scope)].join(":"),
+    )
+    .join("|");
 }
 
 export function getReachableSemanticSignals(root: SqlQueryScopeSummary): string[] {

@@ -116,3 +116,85 @@ test("changes in an unused CTE do not alter the outer metric", () => {
   assert.equal(result.detected_differences.length, 0);
   assert.ok(result.parser_limitations?.some((note) => /WITH\/CTE/.test(note)));
 });
+
+test("a projected-column change inside a referenced CTE is attributed to that scope", () => {
+  const result = compareSqlQueries(
+    `WITH selected AS (SELECT user_id FROM events)
+     SELECT COUNT(*) FROM selected`,
+    `WITH selected AS (SELECT account_id FROM events)
+     SELECT COUNT(*) FROM selected`,
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        /CTE selected/i.test(difference.description) &&
+        /selected expression/i.test(difference.description) &&
+        /user_id/i.test(difference.description) &&
+        /account_id/i.test(difference.description),
+    ),
+  );
+  assert.ok(
+    !result.detected_differences.some(
+      (difference) =>
+        difference.category === "metric_intent_mismatch" &&
+        /Query A is engagement, while Query B is engagement/i.test(difference.description),
+    ),
+  );
+});
+
+test("a grouping change inside a referenced CTE remains scoped", () => {
+  const result = compareSqlQueries(
+    `WITH totals AS (
+       SELECT user_id, SUM(amount) AS amount
+       FROM orders
+       GROUP BY user_id
+     )
+     SELECT COUNT(*) FROM totals`,
+    `WITH totals AS (
+       SELECT user_id, SUM(amount) AS amount
+       FROM orders
+       GROUP BY user_id, status
+     )
+     SELECT COUNT(*) FROM totals`,
+  );
+
+  assert.notEqual(result.risk_level, "low");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "reporting_grain_mismatch" &&
+        /CTE totals/i.test(difference.description) &&
+        /user_id/i.test(difference.description) &&
+        /status/i.test(difference.description),
+    ),
+  );
+});
+
+test("an inner output alias does not become the outer metric name", () => {
+  const result = compareSqlQueries(
+    `WITH selected AS (SELECT user_id AS buyer FROM events)
+     SELECT COUNT(*) FROM selected`,
+    `WITH selected AS (SELECT user_id AS purchaser FROM events)
+     SELECT COUNT(*) FROM selected`,
+  );
+
+  assert.equal(result.metric_name_a, "selected_metric");
+  assert.equal(result.metric_name_b, "selected_metric");
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.detected_differences.length, 0);
+});
+
+test("implicit output-alias renames inside a CTE are syntactic only", () => {
+  const result = compareSqlQueries(
+    `WITH selected AS (SELECT user_id buyer FROM events)
+     SELECT COUNT(*) FROM selected`,
+    `WITH selected AS (SELECT user_id purchaser FROM events)
+     SELECT COUNT(*) FROM selected`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.detected_differences.length, 0);
+});

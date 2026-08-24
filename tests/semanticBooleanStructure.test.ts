@@ -79,3 +79,29 @@ test("identical complex boolean logic stays low risk", () => {
   assert.equal(result.risk_level, "low");
   assert.equal(result.detected_differences.length, 0);
 });
+
+test("De Morgan OR negation is treated as equivalent", () => {
+  const result = compareSqlQueries(
+    `SELECT COUNT(*) FROM users
+     WHERE NOT (active = true OR country = 'DE')`,
+    `SELECT COUNT(*) FROM users
+     WHERE NOT active = true AND NOT country = 'DE'`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.semantic_similarity_score, 100);
+  assert.equal(result.detected_differences.length, 0);
+});
+
+test("De Morgan AND negation is treated as equivalent", () => {
+  const result = compareSqlQueries(
+    `SELECT COUNT(*) FROM users
+     WHERE NOT (active = true AND country = 'DE')`,
+    `SELECT COUNT(*) FROM users
+     WHERE NOT active = true OR NOT country = 'DE'`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.semantic_similarity_score, 100);
+  assert.equal(result.detected_differences.length, 0);
+});

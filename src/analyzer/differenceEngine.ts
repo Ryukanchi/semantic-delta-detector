@@ -229,6 +229,15 @@ function compareNestedQueryScopes(
     const labelB = comparableNestedLabel(nestedB);
     const scopeLabel = labelA === labelB ? labelA : `${labelA} / ${labelB}`;
 
+    if (nestedA.correlated !== nestedB.correlated) {
+      differences.push({
+        category: "filter_logic_mismatch",
+        description: `${scopeLabel} changed from ${nestedA.correlated ? "correlated" : "uncorrelated"} to ${nestedB.correlated ? "correlated" : "uncorrelated"}. This changes whether the inner predicate depends on each outer record and can materially change which outer records qualify.`,
+        impact: "high",
+      });
+      continue;
+    }
+
     const inverseExistence =
       (nestedA.operator === "exists" && nestedB.operator === "not exists") ||
       (nestedA.operator === "not exists" && nestedB.operator === "exists");
@@ -286,6 +295,39 @@ function compareNestedQueryScopes(
       continue;
     }
 
+    const selectionsA = [...nestedA.scope.canonicalSelectExpressions].sort();
+    const selectionsB = [...nestedB.scope.canonicalSelectExpressions].sort();
+    if (selectionsA.join("|") !== selectionsB.join("|")) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its selected expressions from ${selectionsA.join(", ") || "none"} to ${selectionsB.join(", ") || "none"}. This changes the values produced by that scope.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const groupsA = [...nestedA.scope.canonicalGroupByExpressions].sort();
+    const groupsB = [...nestedB.scope.canonicalGroupByExpressions].sort();
+    if (groupsA.join("|") !== groupsB.join("|")) {
+      differences.push({
+        category: "reporting_grain_mismatch",
+        description: `${scopeLabel} changes its grouping from ${groupsA.join(", ") || "ungrouped"} to ${groupsB.join(", ") || "ungrouped"}. This changes the grain produced by that scope without attributing it to the outer query.`,
+        impact: "medium",
+      });
+      continue;
+    }
+
+    const joinPredicatesA = [...nestedA.scope.joinPredicates].sort();
+    const joinPredicatesB = [...nestedB.scope.joinPredicates].sort();
+    if (joinPredicatesA.join("|") !== joinPredicatesB.join("|")) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its join predicate from ${joinPredicatesA.join(", ") || "none"} to ${joinPredicatesB.join(", ") || "none"}. Different join keys can change matches, row multiplication, and the population produced by that scope.`,
+        impact: "high",
+      });
+      continue;
+    }
+
     if (nestedA.scope.canonicalWhereClause !== nestedB.scope.canonicalWhereClause) {
       differences.push({
         category: "business_logic_mismatch",
@@ -296,6 +338,29 @@ function compareNestedQueryScopes(
   }
 
   return differences;
+}
+
+function compareJoinPredicates(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference | null {
+  if (
+    queryA.joinClauses.length === 0 ||
+    queryA.joinClauses.length !== queryB.joinClauses.length
+  ) {
+    return null;
+  }
+  const predicatesA = [...getSqlStructure(queryA).root.joinPredicates].sort();
+  const predicatesB = [...getSqlStructure(queryB).root.joinPredicates].sort();
+  if (predicatesA.join("|") === predicatesB.join("|")) {
+    return null;
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `The join predicate changes from ${predicatesA.join(", ") || "none"} to ${predicatesB.join(", ") || "none"}. Different join keys can change matches, row multiplication, and the measured population.`,
+    impact: "high",
+  };
 }
 
 function compareJoinPopulation(
@@ -1096,6 +1161,10 @@ function compareMetricIntent(
     return null;
   }
 
+  if (profileA.primaryDimension === profileB.primaryDimension) {
+    return null;
+  }
+
   const hasMonetizationMismatch = differences.some(
     (difference) => difference.category === "monetization_mismatch",
   );
@@ -1784,6 +1853,7 @@ export function compareMetricDefinitions(
   detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
+  pushDifference(detectedDifferences, compareJoinPredicates(parsedA, parsedB));
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));
   pushDifference(detectedDifferences, compareReportingGrain(parsedA, parsedB));
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));

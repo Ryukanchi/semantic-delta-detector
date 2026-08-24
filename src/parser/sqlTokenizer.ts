@@ -237,7 +237,10 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
   const whereClause = structure.root.canonicalWhereClause;
   const whereOperators =
     structure.root.booleanExpression?.operators ?? extractWhereOperators(whereClause);
-  const groupByExpressions = extractGroupByExpressions(normalizedQuery);
+  const groupByExpressions =
+    structure.root.canonicalGroupByExpressions.length > 0
+      ? [...structure.root.canonicalGroupByExpressions].sort()
+      : extractGroupByExpressions(structure.root.sql).sort();
   const conditions =
     structure.root.booleanExpression?.predicates ??
     splitConditions(whereClause).map((condition) =>
@@ -245,7 +248,7 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
     );
   const timeWindows = extractTimeWindows(conditions);
   const filters = extractFilters(conditions);
-  const metricName = inferMetricName(normalizedQuery, tables, conditions);
+  const metricName = inferMetricName(structure.root.sql, tables, conditions);
 
   const parsedQuery: ParsedSqlQuery = {
     rawQuery,
