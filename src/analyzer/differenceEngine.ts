@@ -3,7 +3,10 @@ import {
   tokenizeSql,
 } from "../parser/sqlTokenizer.js";
 import {
+  getDirectBaseTables,
+  getReachableNestedScopes,
   getSqlStructure,
+  type ReachableNestedScope,
   type SqlAggregationSummary,
 } from "../parser/sqlStructure.js";
 import {
@@ -140,6 +143,102 @@ function compareAggregation(
     ),
     impact: "high",
   };
+}
+
+function sortedUnique(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function formatScopeAggregations(scope: ReachableNestedScope["scope"]): string {
+  return scope.aggregations.map((aggregation) => aggregation.display).join(", ") || "none";
+}
+
+function comparableNestedLabel(scope: ReachableNestedScope): string {
+  return scope.label.replace(/\s+#\d+$/, "");
+}
+
+function compareNestedQueryScopes(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference[] {
+  const scopesA = getReachableNestedScopes(getSqlStructure(queryA).root);
+  const scopesB = getReachableNestedScopes(getSqlStructure(queryB).root);
+  const differences: DetectedDifference[] = [];
+  const scopeCount = Math.max(scopesA.length, scopesB.length);
+
+  for (let index = 0; index < scopeCount; index += 1) {
+    const nestedA = scopesA[index];
+    const nestedB = scopesB[index];
+    if (!nestedA || !nestedB) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The reachable nested-query structure changed. Query A has ${scopesA.length} reachable CTE/subquery scopes, while Query B has ${scopesB.length}.`,
+        impact: "high",
+      });
+      break;
+    }
+
+    const labelA = comparableNestedLabel(nestedA);
+    const labelB = comparableNestedLabel(nestedB);
+    const scopeLabel = labelA === labelB ? labelA : `${labelA} / ${labelB}`;
+
+    const inverseExistence =
+      (nestedA.operator === "exists" && nestedB.operator === "not exists") ||
+      (nestedA.operator === "not exists" && nestedB.operator === "exists");
+    const inverseMembership =
+      (nestedA.operator === "in" && nestedB.operator === "not in") ||
+      (nestedA.operator === "not in" && nestedB.operator === "in");
+    if (inverseExistence || inverseMembership) {
+      differences.push({
+        category: "filter_logic_mismatch",
+        description: `${scopeLabel} changed from ${nestedA.operator?.toUpperCase()} to ${nestedB.operator?.toUpperCase()}. This negation inverts which outer records qualify for the metric.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const tablesA = sortedUnique(getDirectBaseTables(nestedA.scope));
+    const tablesB = sortedUnique(getDirectBaseTables(nestedB.scope));
+    if (tablesA.join("|") !== tablesB.join("|")) {
+      const outerTablesA = sortedUnique(getDirectBaseTables(getSqlStructure(queryA).root));
+      const outerTablesB = sortedUnique(getDirectBaseTables(getSqlStructure(queryB).root));
+      const outerNote =
+        outerTablesA.length > 0 && outerTablesA.join("|") === outerTablesB.join("|")
+          ? ` The outer source ${outerTablesA.join(", ")} remains unchanged.`
+          : "";
+      differences.push({
+        category: "source_domain_mismatch",
+        description: `${scopeLabel} changes its source from ${tablesA.join(", ") || "no direct table"} to ${tablesB.join(", ") || "no direct table"}.${outerNote}`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const aggregationsA = nestedA.scope.aggregations
+      .map((aggregation) => aggregation.canonical)
+      .sort();
+    const aggregationsB = nestedB.scope.aggregations
+      .map((aggregation) => aggregation.canonical)
+      .sort();
+    if (aggregationsA.join("|") !== aggregationsB.join("|")) {
+      differences.push({
+        category: "aggregation_mismatch",
+        description: `${scopeLabel} changes its aggregation set from ${formatScopeAggregations(nestedA.scope)} to ${formatScopeAggregations(nestedB.scope)}.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    if (nestedA.scope.canonicalWhereClause !== nestedB.scope.canonicalWhereClause) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its filter from ${nestedA.scope.canonicalWhereClause || "no filter"} to ${nestedB.scope.canonicalWhereClause || "no filter"}. This changes the population produced by that scope without attributing the change to the outer query.`,
+        impact: /correlated/i.test(scopeLabel) ? "high" : "medium",
+      });
+    }
+  }
+
+  return differences;
 }
 
 function compareJoinPopulation(
@@ -1590,6 +1689,7 @@ export function compareMetricDefinitions(
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
+  detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));

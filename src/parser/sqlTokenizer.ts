@@ -221,14 +221,20 @@ function inferMetricName(query: string, tables: string[], conditions: string[]):
 export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
   const structure = analyzeSqlStructure(rawQuery);
   const normalizedQuery = normalizeWhitespace(rawQuery);
-  const tables = extractTables(normalizedQuery);
-  const joinClauses = extractJoinClauses(normalizedQuery);
+  const structuredTables = structure.root.sources.map((source) => source.name);
+  const tables =
+    structuredTables.length > 0 ? structuredTables : extractTables(normalizedQuery);
+  const structuredJoins = structure.root.sources
+    .filter((source) => source.joinType !== null)
+    .map((source) => ({ type: source.joinType ?? "inner", table: source.name }));
+  const joinClauses =
+    structuredJoins.length > 0 ? structuredJoins : extractJoinClauses(normalizedQuery);
   const selectedExpressions =
     structure.root.selectExpressions.length > 0
       ? structure.root.selectExpressions
       : extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
-  const whereClause = extractWhereClause(normalizedQuery);
+  const whereClause = structure.root.canonicalWhereClause;
   const whereOperators = extractWhereOperators(whereClause);
   const groupByExpressions = extractGroupByExpressions(normalizedQuery);
   const conditions = splitConditions(whereClause).map((condition) =>

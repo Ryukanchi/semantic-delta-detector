@@ -5,7 +5,10 @@ import {
   QuerySemanticProfile,
   RiskLevel,
 } from "../types.js";
-import { getSqlStructure } from "../parser/sqlStructure.js";
+import {
+  getReachableSemanticSignals,
+  getSqlStructure,
+} from "../parser/sqlStructure.js";
 
 function containsAny(text: string, keywords: string[]): boolean {
   const lower = text.toLowerCase();
@@ -19,10 +22,9 @@ function containsPattern(text: string, pattern: RegExp): boolean {
 function findSignal(query: ParsedSqlQuery): string[] {
   const structure = getSqlStructure(query);
   return [
-    ...query.tables,
     ...query.filters,
     ...query.timeWindows,
-    ...structure.root.canonicalSelectExpressions,
+    ...getReachableSemanticSignals(structure.root),
   ].map((value) => value.toLowerCase());
 }
 
