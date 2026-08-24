@@ -194,3 +194,16 @@ test("the most restrictive parser limitation cap wins for combined constructs", 
   assert.match(result.parser_limitations[0], /CASE expression/);
   assert.match(result.parser_limitations[0], /IN \(SELECT \.\.\.\) subquery/);
 });
+
+test("excessive nested-query depth degrades safely", () => {
+  let sql = "SELECT id FROM users";
+  for (let index = 0; index < 15; index += 1) {
+    sql = `SELECT id FROM (${sql}) nested_${index}`;
+  }
+
+  const result = compareSqlQueries(sql, sql);
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /nesting depth/i.test(note)));
+});

@@ -235,11 +235,14 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
       : extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
   const whereClause = structure.root.canonicalWhereClause;
-  const whereOperators = extractWhereOperators(whereClause);
+  const whereOperators =
+    structure.root.booleanExpression?.operators ?? extractWhereOperators(whereClause);
   const groupByExpressions = extractGroupByExpressions(normalizedQuery);
-  const conditions = splitConditions(whereClause).map((condition) =>
-    canonicalizeSqlExpression(condition, structure.root.aliases),
-  );
+  const conditions =
+    structure.root.booleanExpression?.predicates ??
+    splitConditions(whereClause).map((condition) =>
+      canonicalizeSqlExpression(condition, structure.root.aliases),
+    );
   const timeWindows = extractTimeWindows(conditions);
   const filters = extractFilters(conditions);
   const metricName = inferMetricName(normalizedQuery, tables, conditions);

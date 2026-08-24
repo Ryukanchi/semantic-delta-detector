@@ -1,9 +1,12 @@
+import { analyzeSqlStructure } from "./sqlStructure.js";
+
 export type UnsupportedSqlConstructKind =
   | "cte"
   | "case_expression"
   | "derived_table_subquery"
   | "in_subquery"
-  | "exists_subquery";
+  | "exists_subquery"
+  | "scope_depth_limit";
 
 export type ParserConfidenceCap = "low" | "medium";
 
@@ -58,14 +61,23 @@ const constructChecks: Array<{
 
 export function detectUnsupportedSqlConstructs(sql: string): UnsupportedSqlConstruct[] {
   const normalized = sql.replace(/\s+/g, " ");
-
-  return constructChecks
+  const constructs = constructChecks
     .filter((check) => check.pattern.test(normalized))
     .map((check) => ({
       construct: check.construct,
       label: check.label,
       confidenceCap: check.confidenceCap,
     }));
+
+  if (analyzeSqlStructure(sql).depthLimited) {
+    constructs.push({
+      construct: "scope_depth_limit",
+      label: "nested-query nesting depth limit",
+      confidenceCap: "low",
+    });
+  }
+
+  return constructs;
 }
 
 function buildQueryLimitationNote(

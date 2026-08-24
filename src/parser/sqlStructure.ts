@@ -34,6 +34,20 @@ export interface SqlSubquerySummary {
   scope: SqlQueryScopeSummary;
 }
 
+export interface SqlCaseSummary {
+  canonical: string;
+  conditions: string[];
+  results: string[];
+}
+
+export interface SqlBooleanExpressionSummary {
+  kind: "predicate" | "not" | "and" | "or";
+  canonical: string;
+  predicates: string[];
+  operators: Array<"and" | "or">;
+  hasNegation: boolean;
+}
+
 export interface SqlQueryScopeSummary {
   kind: "root" | "cte" | "subquery" | "derived";
   name?: string;
@@ -47,6 +61,8 @@ export interface SqlQueryScopeSummary {
   canonicalWhereClause: string | null;
   ctes: SqlCteSummary[];
   subqueries: SqlSubquerySummary[];
+  cases: SqlCaseSummary[];
+  booleanExpression: SqlBooleanExpressionSummary | null;
   depthLimited: boolean;
 }
 
@@ -286,6 +302,296 @@ export function canonicalizeSqlExpression(
     .trim();
 }
 
+function findCaseRanges(input: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let quote: "'" | '"' | null = null;
+  let caseDepth = 0;
+  let start = -1;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      quote = current;
+      continue;
+    }
+    if (matchesKeyword(input, index, "case")) {
+      if (caseDepth === 0) start = index;
+      caseDepth += 1;
+      index += 3;
+      continue;
+    }
+    if (caseDepth > 0 && matchesKeyword(input, index, "end")) {
+      caseDepth -= 1;
+      if (caseDepth === 0 && start >= 0) {
+        ranges.push({ start, end: index + 3 });
+        start = -1;
+      }
+      index += 2;
+    }
+  }
+  return ranges;
+}
+
+function findTopLevelCaseKeywords(
+  caseExpression: string,
+): Array<{ keyword: "when" | "then" | "else" | "end"; start: number; end: number }> {
+  const keywords: Array<{
+    keyword: "when" | "then" | "else" | "end";
+    start: number;
+    end: number;
+  }> = [];
+  let nestedCaseDepth = 0;
+  let quote: "'" | '"' | null = null;
+
+  for (let index = 4; index < caseExpression.length; index += 1) {
+    const current = caseExpression[index];
+    const next = caseExpression[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      quote = current;
+      continue;
+    }
+    if (matchesKeyword(caseExpression, index, "case")) {
+      nestedCaseDepth += 1;
+      index += 3;
+      continue;
+    }
+    if (matchesKeyword(caseExpression, index, "end")) {
+      if (nestedCaseDepth > 0) {
+        nestedCaseDepth -= 1;
+      } else {
+        keywords.push({ keyword: "end", start: index, end: index + 3 });
+        break;
+      }
+      index += 2;
+      continue;
+    }
+    if (nestedCaseDepth > 0) continue;
+    for (const keyword of ["when", "then", "else"] as const) {
+      if (matchesKeyword(caseExpression, index, keyword)) {
+        keywords.push({ keyword, start: index, end: index + keyword.length });
+        index += keyword.length - 1;
+        break;
+      }
+    }
+  }
+  return keywords;
+}
+
+function summarizeCaseExpression(
+  caseExpression: string,
+  aliases: ReadonlyMap<string, string>,
+): SqlCaseSummary {
+  const keywords = findTopLevelCaseKeywords(caseExpression);
+  const conditions: string[] = [];
+  const results: string[] = [];
+  const firstWhen = keywords.find((item) => item.keyword === "when");
+  const baseExpression = firstWhen
+    ? canonicalizeSqlExpression(caseExpression.slice(4, firstWhen.start), aliases)
+    : "";
+
+  for (let index = 0; index < keywords.length; index += 1) {
+    const current = keywords[index];
+    if (current.keyword === "when") {
+      const then = keywords[index + 1];
+      if (then?.keyword !== "then") continue;
+      const condition = canonicalizeSqlExpression(
+        caseExpression.slice(current.end, then.start),
+        aliases,
+      );
+      conditions.push(baseExpression ? baseExpression + "=" + condition : condition);
+      const nextBoundary = keywords[index + 2];
+      results.push(
+        canonicalizeSqlExpression(
+          caseExpression.slice(then.end, nextBoundary?.start ?? caseExpression.length),
+          aliases,
+        ),
+      );
+    } else if (current.keyword === "else") {
+      const end = keywords[index + 1];
+      results.push(
+        canonicalizeSqlExpression(
+          caseExpression.slice(current.end, end?.start ?? caseExpression.length),
+          aliases,
+        ),
+      );
+    }
+  }
+
+  return {
+    canonical:
+      "case(" + conditions.join("|") + "=>" + results.join("|") + ")",
+    conditions,
+    results,
+  };
+}
+
+function extractCaseSummaries(
+  fragments: string[],
+  aliases: ReadonlyMap<string, string>,
+): SqlCaseSummary[] {
+  return fragments.flatMap((fragment) =>
+    findCaseRanges(fragment).map((range) =>
+      summarizeCaseExpression(fragment.slice(range.start, range.end), aliases),
+    ),
+  );
+}
+
+function replaceCaseExpressions(input: string): string {
+  const ranges = findCaseRanges(input);
+  if (ranges.length === 0) return input;
+  let result = "";
+  let cursor = 0;
+  for (const range of ranges) {
+    result += input.slice(cursor, range.start) + "__case_expression__";
+    cursor = range.end;
+  }
+  return result + input.slice(cursor);
+}
+
+function stripBalancedOuterParentheses(input: string): string {
+  let result = normalizeWhitespace(input);
+  while (result.startsWith("(")) {
+    const closing = findMatchingParenthesis(result, 0);
+    if (closing !== result.length - 1) break;
+    result = normalizeWhitespace(result.slice(1, -1));
+  }
+  return result;
+}
+
+function splitTopLevelBoolean(input: string, operator: "and" | "or"): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let caseDepth = 0;
+  let betweenPending = false;
+  let quote: "'" | '"' | null = null;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (quote) {
+      if (current === quote && next === quote) index += 1;
+      else if (current === quote) quote = null;
+      continue;
+    }
+    if (current === "'" || current === '"') {
+      quote = current;
+      continue;
+    }
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+    if (current === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth > 0) continue;
+    if (matchesKeyword(input, index, "case")) {
+      caseDepth += 1;
+      index += 3;
+      continue;
+    }
+    if (caseDepth > 0 && matchesKeyword(input, index, "end")) {
+      caseDepth -= 1;
+      index += 2;
+      continue;
+    }
+    if (caseDepth > 0) continue;
+    if (matchesKeyword(input, index, "between")) {
+      betweenPending = true;
+      index += 6;
+      continue;
+    }
+    if (betweenPending && matchesKeyword(input, index, "and")) {
+      betweenPending = false;
+      index += 2;
+      continue;
+    }
+    if (matchesKeyword(input, index, operator)) {
+      parts.push(normalizeWhitespace(input.slice(start, index)));
+      start = index + operator.length;
+      index += operator.length - 1;
+    }
+  }
+
+  if (parts.length === 0) return [normalizeWhitespace(input)];
+  parts.push(normalizeWhitespace(input.slice(start)));
+  return parts.filter(Boolean);
+}
+
+function buildBooleanNode(
+  kind: "and" | "or",
+  children: SqlBooleanExpressionSummary[],
+): SqlBooleanExpressionSummary {
+  const canonicalChildren = children.map((child) => child.canonical).sort();
+  return {
+    kind,
+    canonical: kind + "(" + canonicalChildren.join(",") + ")",
+    predicates: [...new Set(children.flatMap((child) => child.predicates))].sort(),
+    operators: [kind, ...children.flatMap((child) => child.operators)],
+    hasNegation: children.some((child) => child.hasNegation),
+  };
+}
+
+function parseBooleanExpression(input: string): SqlBooleanExpressionSummary | null {
+  const normalized = stripBalancedOuterParentheses(input);
+  if (!normalized) return null;
+
+  const orParts = splitTopLevelBoolean(normalized, "or");
+  if (orParts.length > 1) {
+    return buildBooleanNode(
+      "or",
+      orParts.map((part) => parseBooleanExpression(part)).filter(Boolean) as SqlBooleanExpressionSummary[],
+    );
+  }
+  const andParts = splitTopLevelBoolean(normalized, "and");
+  if (andParts.length > 1) {
+    return buildBooleanNode(
+      "and",
+      andParts.map((part) => parseBooleanExpression(part)).filter(Boolean) as SqlBooleanExpressionSummary[],
+    );
+  }
+
+  let remainder = normalized;
+  let negations = 0;
+  while (matchesKeyword(remainder, 0, "not")) {
+    negations += 1;
+    remainder = stripBalancedOuterParentheses(remainder.slice(3));
+  }
+  if (negations > 0) {
+    const child = parseBooleanExpression(remainder);
+    if (!child) return null;
+    if (negations % 2 === 0) return child;
+    return {
+      kind: "not",
+      canonical: "not(" + child.canonical + ")",
+      predicates: child.predicates,
+      operators: child.operators,
+      hasNegation: true,
+    };
+  }
+
+  return {
+    kind: "predicate",
+    canonical: "predicate(" + normalized + ")",
+    predicates: [normalized],
+    operators: [],
+    hasNegation: false,
+  };
+}
+
 function extractAggregations(
   expressions: string[],
   aliases: ReadonlyMap<string, string>,
@@ -308,7 +614,10 @@ function extractAggregations(
       const rawArgument = normalizeWhitespace(expression.slice(openingIndex + 1, closingIndex));
       const distinctMatch = rawArgument.match(/^distinct\s+(.+)$/i);
       const distinct = Boolean(distinctMatch);
-      const argument = canonicalizeSqlExpression(distinctMatch?.[1] ?? rawArgument, aliases);
+      const argument = canonicalizeSqlExpression(
+        replaceCaseExpressions(distinctMatch?.[1] ?? rawArgument),
+        aliases,
+      );
       const canonical =
         functionName + "(" + (distinct ? "distinct " : "") + argument + ")";
       aggregations.push({
@@ -584,6 +893,8 @@ function emptyScope(
     canonicalWhereClause: null,
     ctes: [],
     subqueries: [],
+    cases: [],
+    booleanExpression: null,
     depthLimited: true,
   };
 }
@@ -686,6 +997,15 @@ function parseSqlScope(
       : null,
     ctes: ctePrefix.ctes,
     subqueries: [...selectSubqueries, ...processedWhere.subqueries],
+    cases: extractCaseSummaries(
+      [...processedSelectExpressions, ...(whereClause ? [processedWhere.canonicalFragment] : [])],
+      aliases,
+    ),
+    booleanExpression: whereClause
+      ? parseBooleanExpression(
+          canonicalizeSqlExpression(processedWhere.canonicalFragment, aliases),
+        )
+      : null,
     depthLimited: false,
   };
 }

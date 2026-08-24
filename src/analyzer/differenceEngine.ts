@@ -8,6 +8,7 @@ import {
   getSqlStructure,
   type ReachableNestedScope,
   type SqlAggregationSummary,
+  type SqlQueryScopeSummary,
 } from "../parser/sqlStructure.js";
 import {
   analyzeParserLimitations,
@@ -157,6 +158,52 @@ function comparableNestedLabel(scope: ReachableNestedScope): string {
   return scope.label.replace(/\s+#\d+$/, "");
 }
 
+function compareCaseCollections(
+  scopeA: SqlQueryScopeSummary,
+  scopeB: SqlQueryScopeSummary,
+  contextLabel = "",
+): DetectedDifference | null {
+  const canonicalA = scopeA.cases.map((item) => item.canonical).sort();
+  const canonicalB = scopeB.cases.map((item) => item.canonical).sort();
+  if (canonicalA.join("|") === canonicalB.join("|")) {
+    return null;
+  }
+
+  if (scopeA.cases.length !== scopeB.cases.length) {
+    return {
+      category: "business_logic_mismatch",
+      description: `${contextLabel ? `${contextLabel} ` : ""}CASE expression count changed from ${scopeA.cases.length} to ${scopeB.cases.length}. CASE expressions can change which values contribute to the metric.`,
+      impact: "high",
+    };
+  }
+
+  for (let index = 0; index < scopeA.cases.length; index += 1) {
+    const caseA = scopeA.cases[index];
+    const caseB = scopeB.cases[index];
+    const label = `${contextLabel ? `${contextLabel} ` : ""}CASE expression #${index + 1}`;
+    if (caseA.conditions.join("|") !== caseB.conditions.join("|")) {
+      return {
+        category: "business_logic_mismatch",
+        description: `${label} changes its condition from ${caseA.conditions.join("; ") || "none"} to ${caseB.conditions.join("; ") || "none"}. This changes which rows or values qualify inside the metric definition.`,
+        impact: "high",
+      };
+    }
+    if (caseA.results.join("|") !== caseB.results.join("|")) {
+      return {
+        category: "business_logic_mismatch",
+        description: `${label} changes its result from ${caseA.results.join("; ") || "none"} to ${caseB.results.join("; ") || "none"}. This changes the value produced by the metric definition.`,
+        impact: "high",
+      };
+    }
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `${contextLabel ? `${contextLabel} ` : ""}CASE expression structure changed and may alter the metric definition.`,
+    impact: "high",
+  };
+}
+
 function compareNestedQueryScopes(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
@@ -211,6 +258,16 @@ function compareNestedQueryScopes(
         description: `${scopeLabel} changes its source from ${tablesA.join(", ") || "no direct table"} to ${tablesB.join(", ") || "no direct table"}.${outerNote}`,
         impact: "high",
       });
+      continue;
+    }
+
+    const caseDifference = compareCaseCollections(
+      nestedA.scope,
+      nestedB.scope,
+      scopeLabel,
+    );
+    if (caseDifference) {
+      differences.push(caseDifference);
       continue;
     }
 
@@ -839,6 +896,37 @@ function compareFilterBooleanLogic(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
 ): DetectedDifference | null {
+  const booleanA = getSqlStructure(queryA).root.booleanExpression;
+  const booleanB = getSqlStructure(queryB).root.booleanExpression;
+  if (booleanA && booleanB) {
+    if (booleanA.canonical === booleanB.canonical) {
+      return null;
+    }
+
+    if (booleanA.predicates.join("|") !== booleanB.predicates.join("|")) {
+      return null;
+    }
+
+    if (booleanA.hasNegation !== booleanB.hasNegation) {
+      return {
+        category: "filter_logic_mismatch",
+        description: "The WHERE boolean negation structure changed while the underlying predicates stayed the same. Adding or removing NOT can invert which records qualify for the metric.",
+        impact: "high",
+      };
+    }
+
+    const simpleAndOrTransition =
+      (usesOnly(queryA.whereOperators, "and") && usesOnly(queryB.whereOperators, "or")) ||
+      (usesOnly(queryA.whereOperators, "or") && usesOnly(queryB.whereOperators, "and"));
+    if (!simpleAndOrTransition) {
+      return {
+        category: "filter_logic_mismatch",
+        description: `The WHERE boolean operator structure changed through different AND/OR grouping while the predicates stayed the same (${formatFilterList(booleanA.predicates)}). Different parenthesis and precedence structure can change the measured population.`,
+        impact: "high",
+      };
+    }
+  }
+
   // Only judge boolean structure when the individual conditions are identical;
   // added or removed conditions are covered by the filter-scope detectors.
   if (!queryA.whereClause || !queryB.whereClause || !hasSameConditionSet(queryA, queryB)) {
@@ -1689,6 +1777,10 @@ export function compareMetricDefinitions(
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareCaseCollections(getSqlStructure(parsedA).root, getSqlStructure(parsedB).root),
+  );
   detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
