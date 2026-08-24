@@ -2,6 +2,92 @@ import { ParsedSqlQuery, SqlJoinClause, WhereBooleanOperator } from "../types.js
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
 
+function stripSqlComments(input: string): string {
+  let result = "";
+  let index = 0;
+  let state: "normal" | "line-comment" | "block-comment" | "single-quote" | "double-quote" =
+    "normal";
+
+  while (index < input.length) {
+    const current = input[index];
+    const next = input[index + 1];
+
+    if (state === "line-comment") {
+      if (current === "\n" || current === "\r") {
+        result += current;
+        state = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (state === "block-comment") {
+      if (current === "*" && next === "/") {
+        state = "normal";
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    result += current;
+
+    if (state === "single-quote") {
+      if (current === "'" && next === "'") {
+        result += next;
+        index += 2;
+        continue;
+      }
+      if (current === "'") {
+        state = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (state === "double-quote") {
+      if (current === '"' && next === '"') {
+        result += next;
+        index += 2;
+        continue;
+      }
+      if (current === '"') {
+        state = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (current === "-" && next === "-") {
+      result = result.slice(0, -1);
+      state = "line-comment";
+      index += 2;
+      continue;
+    }
+
+    if (current === "/" && next === "*") {
+      result = result.slice(0, -1);
+      state = "block-comment";
+      index += 2;
+      continue;
+    }
+
+    if (current === "'") {
+      state = "single-quote";
+    } else if (current === '"') {
+      state = "double-quote";
+    }
+    index += 1;
+  }
+
+  return result;
+}
+
+export function hasAnalyzableSqlContent(rawQuery: string): boolean {
+  return stripSqlComments(rawQuery).replace(/;/g, "").trim().length > 0;
+}
+
 function normalizeWhitespace(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }

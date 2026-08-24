@@ -1,4 +1,7 @@
-import { tokenizeSql } from "../parser/sqlTokenizer.js";
+import {
+  hasAnalyzableSqlContent,
+  tokenizeSql,
+} from "../parser/sqlTokenizer.js";
 import { buildParserLimitationNotes } from "../parser/unsupportedConstructs.js";
 import {
   buildSemanticProfile,
@@ -36,6 +39,15 @@ function normalizeMetricInput(input: MetricDefinitionInput): MetricDefinitionInp
     description: input.description?.trim() || undefined,
     intended_use: input.intended_use?.trim() || undefined,
   };
+}
+
+function requireAnalyzableSqlInput(
+  input: MetricDefinitionInput,
+  queryLabel: "A" | "B",
+): void {
+  if (!hasAnalyzableSqlContent(input.query)) {
+    throw new Error(`Query ${queryLabel} SQL input must contain analyzable content.`);
+  }
 }
 
 function getDisplayMetricName(
@@ -1526,6 +1538,8 @@ export function compareMetricDefinitions(
 ): SemanticComparisonResult {
   const normalizedInputA = normalizeMetricInput(inputA);
   const normalizedInputB = normalizeMetricInput(inputB);
+  requireAnalyzableSqlInput(normalizedInputA, "A");
+  requireAnalyzableSqlInput(normalizedInputB, "B");
   const parsedA = tokenizeSql(normalizedInputA.query);
   const parsedB = tokenizeSql(normalizedInputB.query);
   const profileA = buildSemanticProfile(parsedA);
