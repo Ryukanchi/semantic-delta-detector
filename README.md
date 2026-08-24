@@ -184,6 +184,13 @@ Semantic Delta currently reasons about signals such as:
 
 Formatting-only or semantically equivalent changes should remain low risk, reducing alert fatigue and making higher-severity findings more useful.
 
+Trustworthiness guardrails keep uncertainty explicit:
+
+- empty, whitespace-only, and comment-only SQL inputs are rejected instead of being reported as low risk;
+- partially modeled CTE and CASE constructs cap confidence at `medium`, while detected subqueries cap it at `low`;
+- parser limitations reduce confidence without automatically increasing semantic risk;
+- unknown CLI options and unsupported positional arguments fail with an error instead of being ignored.
+
 ## Safe local Git boundary
 
 Git integration is deliberately conservative:
