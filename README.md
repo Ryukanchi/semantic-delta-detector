@@ -174,15 +174,20 @@ Semantic Delta currently reasons about signals such as:
 | Change | Example semantic risk |
 | --- | --- |
 | Aggregation | Unique users become event rows |
+| Multiple aggregations | One measure inside a multi-metric SELECT changes |
 | Population filter | Paid users become all users |
 | Time window | 7-day activity becomes 30-day activity |
 | Join behavior | `LEFT JOIN` becomes `INNER JOIN` |
+| Join predicate | A join switches from `purchase.user_id` to `purchase.id` |
 | Source table | Orders become payments |
 | Geography or cohort | German users become US users |
 | Exclusion filter | Internal, test, or deleted users enter the metric |
 | Reporting grain | Daily counts become monthly counts |
+| Selected nested-query patterns | A referenced CTE or subquery changes its source, filter, projection, aggregation, or grouping |
+| CASE logic | A `WHEN`, `THEN`, or `ELSE` branch changes |
+| Boolean structure | Parentheses, `AND`/`OR`, or `NOT` change the qualifying population |
 
-Formatting-only or semantically equivalent changes should remain low risk, reducing alert fatigue and making higher-severity findings more useful.
+Formatting-only or supported equivalent changes should remain low risk. The analyzer canonicalizes table-alias renames, aggregation and `GROUP BY` ordering, equality operand order, predicate ordering within the same Boolean group, double negation, and simple De Morgan forms. Source roles remain distinct for supported self-join and correlated-subquery patterns.
 
 Trustworthiness guardrails keep uncertainty explicit:
 
@@ -247,7 +252,8 @@ Run the same browser-safe semantic core directly in VS Code:
 ## Current limitations
 
 - SQL understanding is heuristic; there is no full SQL AST parser.
-- Complex SQL such as CTEs and subqueries is only partially modeled.
+- Selected CTE, derived-table, subquery, alias, CASE, join-predicate, and Boolean-grouping patterns are structurally modeled, but complex or dialect-specific forms remain only partially understood.
+- Query scopes are compared heuristically by reachable structure; this is not full name resolution, lineage analysis, or logical-equivalence proof.
 - Added and deleted metrics are observable but do not yet receive semantic risk.
 - Git mode compares committed refs, not uncommitted worktree or index changes.
 - The project does not post real pull-request comments.
