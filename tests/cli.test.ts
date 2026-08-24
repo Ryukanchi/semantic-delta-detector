@@ -1,9 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+function runCli(args: string[]) {
+  return spawnSync(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", ...args],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      shell: false,
+    },
+  );
+}
 
 test("CLI PR examples include validated semantic cases", () => {
   const output = execFileSync(
@@ -185,4 +197,63 @@ test("cli reports friendly validation errors for malformed json metadata", () =>
       ),
     /field "metric_name" must be a string if provided/,
   );
+});
+
+test("CLI rejects unknown options with exit code 1", () => {
+  const cases = [
+    ["--wat"],
+    ["--formt", "json"],
+    ["--changed-froom", "HEAD"],
+    ["--fail-onn", "medium"],
+  ];
+
+  for (const args of cases) {
+    const result = runCli(args);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, new RegExp(`Error: Unknown option: ${args[0]}`));
+  }
+});
+
+test("CLI rejects unexpected positional arguments", () => {
+  const result = runCli(["surprise"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Error: Unexpected positional argument: surprise/);
+});
+
+test("CLI continues to consume values for valid nearby options", () => {
+  const formatResult = runCli([
+    "--example",
+    "same-de-users-formatting",
+    "--format",
+    "json",
+  ]);
+  assert.equal(formatResult.status, 0, formatResult.stderr);
+  assert.equal(JSON.parse(formatResult.stdout).risk_level, "low");
+
+  const gateResult = runCli([
+    "--example",
+    "same-de-users-formatting",
+    "--fail-on",
+    "medium",
+    "--pr",
+  ]);
+  assert.equal(gateResult.status, 0, gateResult.stderr);
+  assert.match(gateResult.stdout, /LOW RISK/);
+
+  const gitResult = runCli([
+    "--changed-from",
+    "HEAD",
+    "--changed-to",
+    "HEAD",
+    "--repo",
+    process.cwd(),
+    "--format",
+    "json",
+  ]);
+  assert.equal(gitResult.status, 0, gitResult.stderr);
+  assert.equal(JSON.parse(gitResult.stdout).summary.discoveredCount, 0);
 });
