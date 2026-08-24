@@ -5,10 +5,13 @@ import {
 import {
   getDirectBaseTables,
   getReachableNestedScopes,
+  getSetOperationBranches,
+  getSetOperationOperators,
   getSqlStructure,
   type ReachableNestedScope,
   type SqlAggregationSummary,
   type SqlQueryScopeSummary,
+  type SqlStructureSummary,
 } from "../parser/sqlStructure.js";
 import {
   analyzeParserLimitations,
@@ -119,6 +122,84 @@ function compareSourceDomain(
     description: `The queries pull from different source domains: Query A uses ${profileA.sourceDomain} data (${queryA.tables.join(", ") || "unknown"}), while Query B uses ${profileB.sourceDomain} data (${queryB.tables.join(", ") || "unknown"}).`,
     impact: "high",
   };
+}
+
+function describeBranchPosition(index: number): string {
+  const labels = ["first", "second", "third", "fourth", "fifth"];
+  return labels[index] ?? `branch #${index + 1}`;
+}
+
+function compareSetOperations(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference[] {
+  const expressionA = getSqlStructure(queryA).syntax?.setExpression ?? null;
+  const expressionB = getSqlStructure(queryB).syntax?.setExpression ?? null;
+  if (!expressionA && !expressionB) {
+    return [];
+  }
+
+  if (!expressionA || !expressionB) {
+    return [
+      {
+        category: "business_logic_mismatch",
+        description:
+          "One query uses a set operation while the other does not. UNION, INTERSECT, and EXCEPT change how branch result sets are combined.",
+        impact: "high",
+      },
+    ];
+  }
+
+  const differences: DetectedDifference[] = [];
+  const operatorsA = getSetOperationOperators(expressionA);
+  const operatorsB = getSetOperationOperators(expressionB);
+  if (operatorsA.join("|") !== operatorsB.join("|")) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The set-operation sequence changes from ${operatorsA.join(", ").toUpperCase()} to ${operatorsB.join(", ").toUpperCase()}. In particular, UNION and UNION ALL differ in duplicate handling, while INTERSECT and EXCEPT select different populations.`,
+      impact: "high",
+    });
+  }
+
+  const branchesA = getSetOperationBranches(expressionA);
+  const branchesB = getSetOperationBranches(expressionB);
+  if (branchesA.length !== branchesB.length) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The set operation changes from ${branchesA.length} branches in Query A to ${branchesB.length} branches in Query B. Adding or removing a branch changes the combined population.`,
+      impact: "high",
+    });
+    return differences;
+  }
+
+  const sourceSignaturesA = branchesA.map((branch) =>
+    sortedUnique(branch.sources.map((source) => source.name)).join("|"),
+  );
+  const sourceSignaturesB = branchesB.map((branch) =>
+    sortedUnique(branch.sources.map((source) => source.name)).join("|"),
+  );
+  if (
+    [...sourceSignaturesA].sort().join("||") ===
+    [...sourceSignaturesB].sort().join("||")
+  ) {
+    return differences;
+  }
+
+  for (let index = 0; index < branchesA.length; index += 1) {
+    if (sourceSignaturesA[index] === sourceSignaturesB[index]) {
+      continue;
+    }
+
+    const sourcesA = sortedUnique(branchesA[index].sources.map((source) => source.name));
+    const sourcesB = sortedUnique(branchesB[index].sources.map((source) => source.name));
+    differences.push({
+      category: "source_domain_mismatch",
+      description: `The ${describeBranchPosition(index)} set-operation branch changes its source from ${sourcesA.join(", ") || "no physical table"} to ${sourcesB.join(", ") || "no physical table"}. This changes the population contributed by that branch.`,
+      impact: "high",
+    });
+  }
+
+  return differences;
 }
 
 function compareAggregation(
@@ -1311,6 +1392,21 @@ function applyParserConfidenceCap(
   return confidenceLevel === "high" ? "medium" : confidenceLevel;
 }
 
+function getMostRestrictiveParserConfidenceCap(
+  first: ParserConfidenceCap | undefined,
+  second: ParserConfidenceCap | undefined,
+): ParserConfidenceCap | undefined {
+  if (first === "low" || second === "low") {
+    return "low";
+  }
+
+  if (first === "medium" || second === "medium") {
+    return "medium";
+  }
+
+  return undefined;
+}
+
 function ensureRiskCoversDetectedDifferences(
   riskLevel: RiskLevel,
   differences: DetectedDifference[],
@@ -1824,16 +1920,24 @@ export function buildVerdict(
   return "LOW RISK: This change is unlikely to alter the meaning of the metric.";
 }
 
-export function compareMetricDefinitions(
+export interface SqlComparisonAnalysisOverrides {
+  structureA?: SqlStructureSummary;
+  structureB?: SqlStructureSummary;
+  parserLimitations?: string[];
+  confidenceCap?: ParserConfidenceCap;
+}
+
+export function compareMetricDefinitionsWithAnalysis(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
+  overrides: SqlComparisonAnalysisOverrides = {},
 ): SemanticComparisonResult {
   const normalizedInputA = normalizeMetricInput(inputA);
   const normalizedInputB = normalizeMetricInput(inputB);
   requireAnalyzableSqlInput(normalizedInputA, "A");
   requireAnalyzableSqlInput(normalizedInputB, "B");
-  const parsedA = tokenizeSql(normalizedInputA.query);
-  const parsedB = tokenizeSql(normalizedInputB.query);
+  const parsedA = tokenizeSql(normalizedInputA.query, overrides.structureA);
+  const parsedB = tokenizeSql(normalizedInputB.query, overrides.structureB);
   const profileA = buildSemanticProfile(parsedA);
   const profileB = buildSemanticProfile(parsedB);
   const likelyBusinessMeaningA = buildBusinessMeaningSummary(parsedA, profileA);
@@ -1845,6 +1949,7 @@ export function compareMetricDefinitions(
     compareMetricNameAlignment(normalizedInputA, normalizedInputB, profileA, profileB),
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
+  detectedDifferences.push(...compareSetOperations(parsedA, parsedB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
   pushDifference(
     detectedDifferences,
@@ -1883,9 +1988,17 @@ export function compareMetricDefinitions(
   );
   const confidenceLevel = applyParserConfidenceCap(
     inferConfidenceLevel(evidenceSources, detectedDifferences),
-    parserAnalysis.confidenceCap,
+    getMostRestrictiveParserConfidenceCap(
+      parserAnalysis.confidenceCap,
+      overrides.confidenceCap,
+    ),
   );
-  const parserLimitations = parserAnalysis.notes;
+  const parserLimitations = [
+    ...new Set([
+      ...parserAnalysis.notes,
+      ...(overrides.parserLimitations ?? []),
+    ]),
+  ];
 
   const result: SemanticComparisonResult = {
     metric_name_a: getDisplayMetricName(normalizedInputA, parsedA),
@@ -1922,6 +2035,13 @@ export function compareMetricDefinitions(
     verdict: buildVerdict(result, impact),
     impact,
   };
+}
+
+export function compareMetricDefinitions(
+  inputA: MetricDefinitionInput,
+  inputB: MetricDefinitionInput,
+): SemanticComparisonResult {
+  return compareMetricDefinitionsWithAnalysis(inputA, inputB);
 }
 
 export function compareSqlQueries(queryA: string, queryB: string): SemanticComparisonResult {

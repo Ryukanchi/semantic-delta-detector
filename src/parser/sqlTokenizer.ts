@@ -4,6 +4,7 @@ import {
   cacheSqlStructure,
   canonicalizeSqlExpression,
   stripSqlComments,
+  type SqlStructureSummary,
 } from "./sqlStructure.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
@@ -218,8 +219,10 @@ function inferMetricName(query: string, tables: string[], conditions: string[]):
   return "derived_metric";
 }
 
-export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
-  const structure = analyzeSqlStructure(rawQuery);
+export function tokenizeSql(
+  rawQuery: string,
+  structure: SqlStructureSummary = analyzeSqlStructure(rawQuery),
+): ParsedSqlQuery {
   const normalizedQuery = normalizeWhitespace(rawQuery);
   const structuredTables = structure.root.sources.map((source) => source.name);
   const tables =

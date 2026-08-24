@@ -51,6 +51,67 @@ export interface SqlBooleanExpressionSummary {
   depthLimited: boolean;
 }
 
+export type SqlSetOperator = "union" | "union_all" | "intersect" | "except";
+
+export interface SqlSetBranchSourceSummary {
+  name: string;
+  alias: string | null;
+}
+
+export interface SqlSetQuerySummary {
+  kind: "query";
+  sources: SqlSetBranchSourceSummary[];
+}
+
+export interface SqlSetOperationSummary {
+  kind: "set_operation";
+  operator: SqlSetOperator;
+  left: SqlSetExpressionSummary;
+  right: SqlSetExpressionSummary;
+}
+
+export type SqlSetExpressionSummary = SqlSetQuerySummary | SqlSetOperationSummary;
+
+export interface SqlWindowOrderSummary {
+  expression: string;
+  direction: "asc" | "desc" | null;
+}
+
+export interface SqlWindowFrameSummary {
+  unit: "rows" | "range" | "groups";
+  start: string;
+  end: string | null;
+}
+
+export interface SqlWindowSummary {
+  functionName: string;
+  partitionBy: string[];
+  orderBy: SqlWindowOrderSummary[];
+  frame: SqlWindowFrameSummary | null;
+}
+
+export interface SqlSourceOccurrenceSummary {
+  physicalName: string;
+  alias: string | null;
+  scopeId: string;
+}
+
+export interface SqlJoinEdgeSummary {
+  scopeId: string;
+  leftQualifier: string;
+  leftColumn: string;
+  operator: string;
+  rightQualifier: string;
+  rightColumn: string;
+}
+
+export interface SqlSyntaxSummary {
+  setExpression: SqlSetExpressionSummary | null;
+  windows: SqlWindowSummary[];
+  sourceOccurrences: SqlSourceOccurrenceSummary[];
+  joinEdges: SqlJoinEdgeSummary[];
+}
+
 export interface SqlQueryScopeSummary {
   kind: "root" | "cte" | "subquery" | "derived";
   name?: string;
@@ -75,6 +136,7 @@ export interface SqlQueryScopeSummary {
 export interface SqlStructureSummary {
   root: SqlQueryScopeSummary;
   depthLimited: boolean;
+  syntax?: SqlSyntaxSummary;
 }
 
 export interface ReachableNestedScope {
@@ -1266,6 +1328,96 @@ function hasDepthLimitedScope(
 export function analyzeSqlStructure(rawQuery: string): SqlStructureSummary {
   const root = parseSqlScope(rawQuery, "root", undefined, new Map(), new Map(), 0);
   return { root, depthLimited: hasDepthLimitedScope(root) };
+}
+
+export function getSetOperationBranches(
+  expression: SqlSetExpressionSummary,
+): SqlSetQuerySummary[] {
+  if (expression.kind === "query") {
+    return [expression];
+  }
+
+  return [
+    ...getSetOperationBranches(expression.left),
+    ...getSetOperationBranches(expression.right),
+  ];
+}
+
+export function getSetOperationOperators(
+  expression: SqlSetExpressionSummary,
+): SqlSetOperator[] {
+  if (expression.kind === "query") {
+    return [];
+  }
+
+  return [
+    expression.operator,
+    ...getSetOperationOperators(expression.left),
+    ...getSetOperationOperators(expression.right),
+  ];
+}
+
+export function getSetOperationSignature(
+  expression: SqlSetExpressionSummary | null | undefined,
+): string {
+  if (!expression) {
+    return "";
+  }
+
+  if (expression.kind === "query") {
+    return `query(${expression.sources
+      .map((source) => source.name)
+      .sort()
+      .join(",")})`;
+  }
+
+  return `${expression.operator}(${getSetOperationSignature(expression.left)},${getSetOperationSignature(expression.right)})`;
+}
+
+export function getWindowSpecificationSignature(
+  syntax: SqlSyntaxSummary | undefined,
+): string {
+  if (!syntax) {
+    return "";
+  }
+
+  return syntax.windows
+    .map((window) => {
+      const partition = [...window.partitionBy].sort().join(",");
+      const order = window.orderBy
+        .map((item) => `${item.expression}:${item.direction ?? "default"}`)
+        .join(",");
+      const frame = window.frame
+        ? `${window.frame.unit}:${window.frame.start}:${window.frame.end ?? ""}`
+        : "";
+      return `${window.functionName}(partition=${partition};order=${order};frame=${frame})`;
+    })
+    .sort()
+    .join("|");
+}
+
+export function getSourceGraphSignature(
+  syntax: SqlSyntaxSummary | undefined,
+): string {
+  if (!syntax) {
+    return "";
+  }
+
+  const nodes = syntax.sourceOccurrences
+    .map(
+      (source) =>
+        `${source.scopeId}:${source.alias ?? source.physicalName}:${source.physicalName}`,
+    )
+    .sort()
+    .join(",");
+  const edges = syntax.joinEdges
+    .map(
+      (edge) =>
+        `${edge.scopeId}:${edge.leftQualifier}.${edge.leftColumn}${edge.operator}${edge.rightQualifier}.${edge.rightColumn}`,
+    )
+    .sort()
+    .join(",");
+  return `nodes=${nodes};edges=${edges}`;
 }
 
 export function getDirectBaseTables(scope: SqlQueryScopeSummary): string[] {

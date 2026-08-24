@@ -13,6 +13,10 @@
     "./core": {
       "types": "./dist/core.d.ts",
       "import": "./dist/core.js"
+    },
+    "./postgresql": {
+      "types": "./dist/postgresql.d.ts",
+      "import": "./dist/postgresql.js"
     }
   },
   "scripts": {
@@ -38,5 +42,8 @@
     "@types/node": "^24.6.0",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "node-sql-parser": "5.4.0"
   }
 }

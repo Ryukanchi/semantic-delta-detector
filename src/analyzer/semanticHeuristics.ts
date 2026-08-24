@@ -8,6 +8,7 @@ import {
 import {
   getReachableNestedSignature,
   getReachableSemanticSignals,
+  getSetOperationSignature,
   getSqlStructure,
 } from "../parser/sqlStructure.js";
 
@@ -304,6 +305,16 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
   const nestedSignatureB = getReachableNestedSignature(structureB.root);
   if (nestedSignatureA !== nestedSignatureB) {
     score -= 15;
+  }
+
+  const setOperationSignatureA = getSetOperationSignature(
+    structureA.syntax?.setExpression,
+  );
+  const setOperationSignatureB = getSetOperationSignature(
+    structureB.syntax?.setExpression,
+  );
+  if (setOperationSignatureA !== setOperationSignatureB) {
+    score -= 20;
   }
 
   const caseSetA = structureA.root.cases
