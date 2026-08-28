@@ -117,6 +117,17 @@ test("self-join source identity is role-based instead of FROM-position-based", (
       rightColumn: "id",
     },
   ]);
+  assert.equal(employeeFirst.sourceGraphComplete, true);
+  assert.deepEqual(employeeFirst.sourceUsages, [
+    {
+      scopeId: "root",
+      qualifier: "employee",
+      column: "id",
+      context: "projection",
+      functionName: null,
+      distinct: false,
+    },
+  ]);
   assert.equal(
     getSourceGraphSignature(employeeFirst),
     getSourceGraphSignature(managerFirst),

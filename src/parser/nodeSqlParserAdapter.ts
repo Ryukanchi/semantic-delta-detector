@@ -5,6 +5,8 @@ import type {
   SqlSetExpressionSummary,
   SqlSetOperator,
   SqlSourceOccurrenceSummary,
+  SqlSourceUsageContext,
+  SqlSourceUsageSummary,
   SqlSyntaxSummary,
   SqlWindowFrameSummary,
   SqlWindowOrderSummary,
@@ -334,9 +336,9 @@ function collectJoinEdges(
   scopeId: string,
   edges: SqlJoinEdgeSummary[],
   depth = 0,
-): void {
+): boolean {
   if (depth > MAX_VENDOR_AST_DEPTH || !isRecord(expression)) {
-    return;
+    return false;
   }
 
   const left = readColumnReference(expression.left);
@@ -351,19 +353,139 @@ function collectJoinEdges(
       rightQualifier: right.qualifier,
       rightColumn: right.column,
     });
+    return true;
+  }
+
+  if (operator?.toLowerCase() === "and") {
+    const leftComplete = collectJoinEdges(
+      expression.left,
+      scopeId,
+      edges,
+      depth + 1,
+    );
+    const rightComplete = collectJoinEdges(
+      expression.right,
+      scopeId,
+      edges,
+      depth + 1,
+    );
+    return leftComplete && rightComplete;
+  }
+
+  return false;
+}
+
+interface SourceUsageMetadata {
+  functionName: string | null;
+  distinct: boolean;
+}
+
+function collectSourceUsagesFromExpression(
+  value: unknown,
+  scopeId: string,
+  context: SqlSourceUsageContext,
+  usages: SqlSourceUsageSummary[],
+  metadata: SourceUsageMetadata = { functionName: null, distinct: false },
+  depth = 0,
+  seen = new Set<object>(),
+): void {
+  if (depth > MAX_VENDOR_AST_DEPTH) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectSourceUsagesFromExpression(
+        item,
+        scopeId,
+        context,
+        usages,
+        metadata,
+        depth + 1,
+        seen,
+      );
+    }
+    return;
+  }
+  if (!isRecord(value) || seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+
+  const column = readColumnReference(value);
+  if (column) {
+    usages.push({
+      scopeId,
+      qualifier: column.qualifier,
+      column: column.column,
+      context,
+      functionName: metadata.functionName,
+      distinct: metadata.distinct,
+    });
     return;
   }
 
-  collectJoinEdges(expression.left, scopeId, edges, depth + 1);
-  collectJoinEdges(expression.right, scopeId, edges, depth + 1);
+  if (value.type === "aggr_func" && isRecord(value.args)) {
+    const functionName = readString(value.name)?.toLowerCase() ?? null;
+    collectSourceUsagesFromExpression(
+      value.args.expr,
+      scopeId,
+      "aggregation",
+      usages,
+      {
+        functionName,
+        distinct: Boolean(readString(value.args.distinct)),
+      },
+      depth + 1,
+      seen,
+    );
+    return;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key !== "loc" && key !== "over") {
+      collectSourceUsagesFromExpression(
+        child,
+        scopeId,
+        context,
+        usages,
+        metadata,
+        depth + 1,
+        seen,
+      );
+    }
+  }
+}
+
+function collectStatementSourceUsages(
+  statement: Record<string, unknown>,
+  scopeId: string,
+  usages: SqlSourceUsageSummary[],
+): void {
+  const contexts: Array<[unknown, SqlSourceUsageContext]> = [
+    [statement.columns, "projection"],
+    [statement.where, "filter"],
+    [statement.groupby, "grouping"],
+    [statement.having, "having"],
+    [statement.orderby, "ordering"],
+  ];
+  for (const [value, context] of contexts) {
+    collectSourceUsagesFromExpression(value, scopeId, context, usages);
+  }
 }
 
 function collectSourceGraph(
   expression: SqlSetExpressionSummary,
   statement: Record<string, unknown>,
-): { sourceOccurrences: SqlSourceOccurrenceSummary[]; joinEdges: SqlJoinEdgeSummary[] } {
+): {
+  sourceOccurrences: SqlSourceOccurrenceSummary[];
+  joinEdges: SqlJoinEdgeSummary[];
+  sourceUsages: SqlSourceUsageSummary[];
+  sourceGraphComplete: boolean;
+} {
   const sourceOccurrences: SqlSourceOccurrenceSummary[] = [];
   const joinEdges: SqlJoinEdgeSummary[] = [];
+  const sourceUsages: SqlSourceUsageSummary[] = [];
+  let sourceGraphComplete = true;
   let branchIndex = 0;
 
   const visit = (
@@ -391,15 +513,28 @@ function collectSourceGraph(
 
     if (Array.isArray(currentStatement.from)) {
       for (const source of currentStatement.from) {
-        if (isRecord(source) && source.on) {
-          collectJoinEdges(source.on, scopeId, joinEdges);
+        if (!isRecord(source) || !source.join) {
+          continue;
+        }
+        if (source.on) {
+          sourceGraphComplete =
+            collectJoinEdges(source.on, scopeId, joinEdges) &&
+            sourceGraphComplete;
+        } else if (readString(source.join)?.toLowerCase() !== "cross join") {
+          sourceGraphComplete = false;
         }
       }
     }
+    collectStatementSourceUsages(currentStatement, scopeId, sourceUsages);
   };
 
   visit(expression, statement);
-  return { sourceOccurrences, joinEdges };
+  return {
+    sourceOccurrences,
+    joinEdges,
+    sourceUsages,
+    sourceGraphComplete,
+  };
 }
 
 function formatFailureReason(error: unknown): string {
@@ -439,6 +574,8 @@ export class NodeSqlPostgresqlParserAdapter implements ExternalSqlParser {
         windows: collectWindows(statement),
         sourceOccurrences: sourceGraph.sourceOccurrences,
         joinEdges: sourceGraph.joinEdges,
+        sourceUsages: sourceGraph.sourceUsages,
+        sourceGraphComplete: sourceGraph.sourceGraphComplete,
       };
       return { ok: true, syntax };
     } catch (error) {

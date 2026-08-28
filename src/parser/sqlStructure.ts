@@ -106,11 +106,30 @@ export interface SqlJoinEdgeSummary {
   rightColumn: string;
 }
 
+export type SqlSourceUsageContext =
+  | "projection"
+  | "aggregation"
+  | "filter"
+  | "grouping"
+  | "having"
+  | "ordering";
+
+export interface SqlSourceUsageSummary {
+  scopeId: string;
+  qualifier: string | null;
+  column: string;
+  context: SqlSourceUsageContext;
+  functionName: string | null;
+  distinct: boolean;
+}
+
 export interface SqlSyntaxSummary {
   setExpression: SqlSetExpressionSummary | null;
   windows: SqlWindowSummary[];
   sourceOccurrences: SqlSourceOccurrenceSummary[];
   joinEdges: SqlJoinEdgeSummary[];
+  sourceUsages: SqlSourceUsageSummary[];
+  sourceGraphComplete: boolean;
 }
 
 export interface SqlQueryScopeSummary {
