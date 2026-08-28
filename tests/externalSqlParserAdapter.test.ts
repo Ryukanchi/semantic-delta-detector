@@ -29,7 +29,7 @@ test("the adapter maps window partitioning and ordering into Semantic Delta IR",
   const accountWindow = parseSuccessfully(
     `SELECT ROW_NUMBER() OVER (
        PARTITION BY account_id
-       ORDER BY created_at DESC
+       ORDER BY created_at DESC NULLS LAST
      )
      FROM events;`,
   );
@@ -45,7 +45,9 @@ test("the adapter maps window partitioning and ordering into Semantic Delta IR",
     {
       functionName: "row_number",
       partitionBy: ["account_id"],
-      orderBy: [{ expression: "created_at", direction: "desc" }],
+      orderBy: [
+        { expression: "created_at", direction: "desc", nulls: "last" },
+      ],
       frame: null,
     },
   ]);
@@ -147,6 +149,24 @@ test("external parser failure caps confidence without lowering semantic risk", (
   assert.equal(result.risk_level, "high");
   assert.equal(result.confidence_level, "low");
   assert.ok((result.parser_limitations?.length ?? 0) >= 2);
+});
+
+test("unsupported PostgreSQL window shapes keep fallback uncertainty visible", () => {
+  const sql = `SELECT SUM(amount) OVER (
+                 ORDER BY created_at
+                 RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS rolling_amount
+               FROM payments;`;
+
+  const result = compareSqlQueries(sql, sql);
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.confidence_level, "low");
+  assert.equal(result.parser_limitations?.length, 2);
+  assert.match(
+    result.parser_limitations?.[0] ?? "",
+    /enhanced PostgreSQL syntax parser/i,
+  );
 });
 
 test("unsupported statement and CTE mappings fail closed inside the adapter", () => {
