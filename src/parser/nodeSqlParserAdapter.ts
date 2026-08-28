@@ -17,8 +17,17 @@ import type {
   ExternalSqlParser,
 } from "./externalSqlParser.js";
 
-const MAX_VENDOR_AST_DEPTH = 64;
-const MAX_VENDOR_AST_NODES = 20_000;
+export const postgresqlParserResourceLimits = Object.freeze({
+  maxSqlCharacters: 256_000,
+  maxAstDepth: 64,
+  maxAstNodes: 20_000,
+  maxListItems: 4_096,
+  maxSetOperationBranches: 64,
+  maxWindowExpressions: 256,
+  maxSourceOccurrences: 512,
+  maxJoinEdges: 1_024,
+  maxSourceUsages: 4_096,
+});
 
 interface VendorParser {
   astify(sql: string, options?: unknown): unknown;
@@ -39,6 +48,69 @@ const { Parser } = require(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertSqlInputWithinResourceBudget(sql: string): void {
+  if (sql.length > postgresqlParserResourceLimits.maxSqlCharacters) {
+    throw new Error(
+      `SQL input exceeds the ${postgresqlParserResourceLimits.maxSqlCharacters} character resource limit`,
+    );
+  }
+}
+
+function assertVendorAstWithinResourceBudget(root: unknown): void {
+  const seen = new Set<object>();
+  let nodeCount = 0;
+
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > postgresqlParserResourceLimits.maxAstDepth) {
+      throw new Error(
+        `vendor AST depth exceeds the ${postgresqlParserResourceLimits.maxAstDepth} level resource limit`,
+      );
+    }
+    if (Array.isArray(value)) {
+      if (value.length > postgresqlParserResourceLimits.maxListItems) {
+        throw new Error(
+          `vendor AST list exceeds the ${postgresqlParserResourceLimits.maxListItems} item resource limit`,
+        );
+      }
+      if (seen.has(value)) {
+        return;
+      }
+      seen.add(value);
+      nodeCount += 1;
+      if (nodeCount > postgresqlParserResourceLimits.maxAstNodes) {
+        throw new Error(
+          `vendor AST node count exceeds the ${postgresqlParserResourceLimits.maxAstNodes} node resource limit`,
+        );
+      }
+      for (const item of value) {
+        visit(item, depth + 1);
+      }
+      return;
+    }
+    if (!isRecord(value) || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    nodeCount += 1;
+    if (nodeCount > postgresqlParserResourceLimits.maxAstNodes) {
+      throw new Error(
+        `vendor AST node count exceeds the ${postgresqlParserResourceLimits.maxAstNodes} node resource limit`,
+      );
+    }
+    const entries = Object.entries(value);
+    if (entries.length > postgresqlParserResourceLimits.maxListItems) {
+      throw new Error(
+        `vendor AST object exceeds the ${postgresqlParserResourceLimits.maxListItems} property resource limit`,
+      );
+    }
+    for (const [, child] of entries) {
+      visit(child, depth + 1);
+    }
+  };
+
+  visit(root, 0);
 }
 
 function readString(value: unknown): string | null {
@@ -154,10 +226,20 @@ function normalizeSetOperator(value: unknown): SqlSetOperator {
 
 function buildSetExpression(
   statement: Record<string, unknown>,
+  budget = { branchCount: 0 },
   depth = 0,
 ): SqlSetExpressionSummary {
-  if (depth > MAX_VENDOR_AST_DEPTH) {
-    throw new Error("set-operation nesting exceeds the adapter depth limit");
+  if (depth > postgresqlParserResourceLimits.maxAstDepth) {
+    throw new Error("set-operation nesting exceeds the AST depth resource limit");
+  }
+  budget.branchCount += 1;
+  if (
+    budget.branchCount >
+    postgresqlParserResourceLimits.maxSetOperationBranches
+  ) {
+    throw new Error(
+      `set-operation branch count exceeds the ${postgresqlParserResourceLimits.maxSetOperationBranches} branch resource limit`,
+    );
   }
 
   const query: SqlSetExpressionSummary = {
@@ -176,7 +258,7 @@ function buildSetExpression(
     kind: "set_operation",
     operator: normalizeSetOperator(statement.set_op),
     left: query,
-    right: buildSetExpression(statement._next, depth + 1),
+    right: buildSetExpression(statement._next, budget, depth + 1),
   };
 }
 
@@ -302,8 +384,8 @@ function collectWindows(root: unknown): SqlWindowSummary[] {
   let nodeCount = 0;
 
   const visit = (value: unknown, depth: number): void => {
-    if (depth > MAX_VENDOR_AST_DEPTH) {
-      throw new Error("vendor AST traversal exceeds the adapter depth limit");
+    if (depth > postgresqlParserResourceLimits.maxAstDepth) {
+      throw new Error("window traversal exceeds the AST depth resource limit");
     }
     if (Array.isArray(value)) {
       for (const item of value) visit(item, depth + 1);
@@ -314,11 +396,19 @@ function collectWindows(root: unknown): SqlWindowSummary[] {
     }
     seen.add(value);
     nodeCount += 1;
-    if (nodeCount > MAX_VENDOR_AST_NODES) {
-      throw new Error("vendor AST traversal exceeds the adapter node limit");
+    if (nodeCount > postgresqlParserResourceLimits.maxAstNodes) {
+      throw new Error("window traversal exceeds the AST node resource limit");
     }
 
     if ((value.type === "window_func" || value.type === "aggr_func") && value.over) {
+      if (
+        windows.length >=
+        postgresqlParserResourceLimits.maxWindowExpressions
+      ) {
+        throw new Error(
+          `window expression count exceeds the ${postgresqlParserResourceLimits.maxWindowExpressions} expression resource limit`,
+        );
+      }
       windows.push(extractWindowSummary(value));
     }
 
@@ -337,7 +427,10 @@ function collectJoinEdges(
   edges: SqlJoinEdgeSummary[],
   depth = 0,
 ): boolean {
-  if (depth > MAX_VENDOR_AST_DEPTH || !isRecord(expression)) {
+  if (depth > postgresqlParserResourceLimits.maxAstDepth) {
+    throw new Error("join-edge traversal exceeds the AST depth resource limit");
+  }
+  if (!isRecord(expression)) {
     return false;
   }
 
@@ -345,6 +438,11 @@ function collectJoinEdges(
   const right = readColumnReference(expression.right);
   const operator = readString(expression.operator);
   if (left?.qualifier && right?.qualifier && operator) {
+    if (edges.length >= postgresqlParserResourceLimits.maxJoinEdges) {
+      throw new Error(
+        `join-edge count exceeds the ${postgresqlParserResourceLimits.maxJoinEdges} edge resource limit`,
+      );
+    }
     edges.push({
       scopeId,
       leftQualifier: left.qualifier,
@@ -389,8 +487,8 @@ function collectSourceUsagesFromExpression(
   depth = 0,
   seen = new Set<object>(),
 ): void {
-  if (depth > MAX_VENDOR_AST_DEPTH) {
-    return;
+  if (depth > postgresqlParserResourceLimits.maxAstDepth) {
+    throw new Error("source-usage traversal exceeds the AST depth resource limit");
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -413,6 +511,11 @@ function collectSourceUsagesFromExpression(
 
   const column = readColumnReference(value);
   if (column) {
+    if (usages.length >= postgresqlParserResourceLimits.maxSourceUsages) {
+      throw new Error(
+        `source-usage count exceeds the ${postgresqlParserResourceLimits.maxSourceUsages} usage resource limit`,
+      );
+    }
     usages.push({
       scopeId,
       qualifier: column.qualifier,
@@ -504,6 +607,14 @@ function collectSourceGraph(
     branchIndex += 1;
     const scopeId = branchIndex === 1 ? "root" : `set-branch-${branchIndex}`;
     for (const source of currentExpression.sources) {
+      if (
+        sourceOccurrences.length >=
+        postgresqlParserResourceLimits.maxSourceOccurrences
+      ) {
+        throw new Error(
+          `source occurrence count exceeds the ${postgresqlParserResourceLimits.maxSourceOccurrences} occurrence resource limit`,
+        );
+      }
       sourceOccurrences.push({
         physicalName: source.name,
         alias: source.alias,
@@ -546,15 +657,15 @@ export class NodeSqlPostgresqlParserAdapter implements ExternalSqlParser {
   readonly dialect = "postgresql" as const;
   readonly #parser: VendorParser;
 
-  constructor() {
-    this.#parser = new Parser();
+  constructor(parser: VendorParser = new Parser()) {
+    this.#parser = parser;
   }
 
   parse(sql: string): ExternalSqlParseResult {
     try {
-      const parsed = this.#parser.astify(sql, {
-        parseOptions: { includeLocations: true },
-      });
+      assertSqlInputWithinResourceBudget(sql);
+      const parsed = this.#parser.astify(sql);
+      assertVendorAstWithinResourceBudget(parsed);
       const statements = Array.isArray(parsed) ? parsed : [parsed];
       if (statements.length !== 1 || !isRecord(statements[0])) {
         throw new Error("the PostgreSQL adapter requires exactly one SQL statement");
