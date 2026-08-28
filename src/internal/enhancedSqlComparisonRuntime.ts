@@ -1,6 +1,7 @@
 import {
   compareMetricDefinitionsWithAnalysis,
 } from "../analyzer/differenceEngine.js";
+import { analyzeSourceRoles } from "../analyzer/sourceRoleCanonicalization.js";
 import { nodeSqlPostgresqlParser } from "../parser/nodeSqlParserAdapter.js";
 import {
   analyzeSqlStructure,
@@ -13,7 +14,7 @@ import type {
 
 interface EnhancedStructureResult {
   structure: SqlStructureSummary;
-  parserLimitation?: string;
+  analysisLimitations: string[];
 }
 
 function analyzePostgresqlStructure(
@@ -23,17 +24,27 @@ function analyzePostgresqlStructure(
   const fallbackStructure = analyzeSqlStructure(sql);
   const externalResult = nodeSqlPostgresqlParser.parse(sql);
   if (externalResult.ok) {
+    const sourceRoleAnalysis = analyzeSourceRoles(externalResult.syntax);
     return {
       structure: {
         ...fallbackStructure,
         syntax: externalResult.syntax,
       },
+      analysisLimitations:
+        sourceRoleAnalysis.applicable && !sourceRoleAnalysis.safe
+          ? sourceRoleAnalysis.limitations.map(
+              (reason) =>
+                `Query ${queryLabel} ${reason}. Semantic Delta kept its conservative positional fallback behavior, so confidence in the source-role verdict is limited; review this self-join manually.`,
+            )
+          : [],
     };
   }
 
   return {
     structure: fallbackStructure,
-    parserLimitation: `Query ${queryLabel} could not be analyzed by the enhanced PostgreSQL syntax parser (${externalResult.reason}). Semantic Delta kept its lightweight fallback result, but confidence in the semantic verdict is limited for this query; review it manually.`,
+    analysisLimitations: [
+      `Query ${queryLabel} could not be analyzed by the enhanced PostgreSQL syntax parser (${externalResult.reason}). Semantic Delta kept its lightweight fallback result, but confidence in the semantic verdict is limited for this query; review it manually.`,
+    ],
   };
 }
 
@@ -44,9 +55,9 @@ export function comparePostgresqlMetricDefinitions(
   const enhancedA = analyzePostgresqlStructure(inputA.query, "A");
   const enhancedB = analyzePostgresqlStructure(inputB.query, "B");
   const parserLimitations = [
-    enhancedA.parserLimitation,
-    enhancedB.parserLimitation,
-  ].filter((note): note is string => Boolean(note));
+    ...enhancedA.analysisLimitations,
+    ...enhancedB.analysisLimitations,
+  ];
 
   return compareMetricDefinitionsWithAnalysis(inputA, inputB, {
     structureA: enhancedA.structure,

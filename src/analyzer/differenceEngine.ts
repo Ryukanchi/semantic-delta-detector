@@ -30,6 +30,12 @@ import {
   normalizeText,
 } from "./semanticHeuristics.js";
 import {
+  buildSourceRoleComparison,
+  describeSourceUsages,
+  getSourceUsageSignatures,
+  type SourceRoleComparison,
+} from "./sourceRoleCanonicalization.js";
+import {
   ConfidenceLevel,
   DetectedDifference,
   EvidenceSource,
@@ -379,13 +385,45 @@ function compareWindowSpecifications(
 function compareAggregation(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
   const aggregationsA = getSqlStructure(queryA).root.aggregations;
   const aggregationsB = getSqlStructure(queryB).root.aggregations;
   const canonicalA = aggregationsA.map((item) => item.canonical).sort();
   const canonicalB = aggregationsB.map((item) => item.canonical).sort();
 
-  if (canonicalA.join("|") === canonicalB.join("|")) {
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature
+  ) {
+    const roleUsagesA = getSourceUsageSignatures(
+      sourceRoles.analysisA,
+      ["aggregation"],
+    );
+    const roleUsagesB = getSourceUsageSignatures(
+      sourceRoles.analysisB,
+      ["aggregation"],
+    );
+    const neutralCanonicalA = canonicalA.map(normalizePositionalSourceIdentity);
+    const neutralCanonicalB = canonicalB.map(normalizePositionalSourceIdentity);
+    const neutralAggregationsMatch = arraysEqual(
+      neutralCanonicalA,
+      neutralCanonicalB,
+    );
+
+    if (neutralAggregationsMatch && arraysEqual(roleUsagesA, roleUsagesB)) {
+      return null;
+    }
+    if (neutralAggregationsMatch) {
+      return {
+        category: "aggregation_mismatch",
+        description: `The aggregation changes its qualified source role from ${describeSourceUsages(sourceRoles.analysisA.usages, ["aggregation"])} to ${describeSourceUsages(sourceRoles.analysisB.usages, ["aggregation"])}. Although both occurrences come from the same physical table, their join fields show that they measure different semantic roles.`,
+        impact: "high",
+      };
+    }
+  }
+
+  if (arraysEqual(canonicalA, canonicalB)) {
     return null;
   }
 
@@ -399,6 +437,47 @@ function compareAggregation(
     ),
     impact: "high",
   };
+}
+
+function arraysEqual(valuesA: string[], valuesB: string[]): boolean {
+  return valuesA.join("|") === valuesB.join("|");
+}
+
+function normalizePositionalSourceIdentity(value: string): string {
+  return value.replace(/#\d+(?=\.)/g, "");
+}
+
+function compareSourceRoleUsages(
+  sourceRoles: SourceRoleComparison,
+): DetectedDifference[] {
+  if (
+    !sourceRoles.safe ||
+    sourceRoles.analysisA.graphSignature !== sourceRoles.analysisB.graphSignature
+  ) {
+    return [];
+  }
+
+  const contexts = [
+    ["projection", "projection"],
+    ["filter", "filter"],
+    ["grouping", "grouping"],
+    ["having", "HAVING"],
+    ["ordering", "ordering"],
+  ] as const;
+  const differences: DetectedDifference[] = [];
+  for (const [context, label] of contexts) {
+    const signaturesA = getSourceUsageSignatures(sourceRoles.analysisA, [context]);
+    const signaturesB = getSourceUsageSignatures(sourceRoles.analysisB, [context]);
+    if (arraysEqual(signaturesA, signaturesB)) {
+      continue;
+    }
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The qualified ${label} source role changes from ${describeSourceUsages(sourceRoles.analysisA.usages, [context])} to ${describeSourceUsages(sourceRoles.analysisB.usages, [context])}. The physical table is unchanged, but the referenced occurrence has a different role in the self-join graph.`,
+      impact: "high",
+    });
+  }
+  return differences;
 }
 
 function sortedUnique(values: string[]): string[] {
@@ -598,12 +677,25 @@ function compareNestedQueryScopes(
 function compareJoinPredicates(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
   if (
     queryA.joinClauses.length === 0 ||
     queryA.joinClauses.length !== queryB.joinClauses.length
   ) {
     return null;
+  }
+  if (sourceRoles?.safe) {
+    if (
+      sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature
+    ) {
+      return null;
+    }
+    return {
+      category: "business_logic_mismatch",
+      description: `The source-role join graph changes from ${sourceRoles.analysisA.graphDescription} to ${sourceRoles.analysisB.graphDescription}. Different role edges or join-key fields can change matches, row multiplication, and the measured population even when every occurrence comes from the same physical table.`,
+      impact: "high",
+    };
   }
   const predicatesA = [...getSqlStructure(queryA).root.joinPredicates].sort();
   const predicatesB = [...getSqlStructure(queryB).root.joinPredicates].sort();
@@ -752,6 +844,7 @@ function inferReportingGrain(query: ParsedSqlQuery): string | null {
 function compareReportingGrain(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
   const grainA = inferReportingGrain(queryA);
   const grainB = inferReportingGrain(queryB);
@@ -761,6 +854,19 @@ function compareReportingGrain(
   }
 
   if (grainA === grainB) {
+    return null;
+  }
+
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    normalizePositionalSourceIdentity(grainA ?? "") ===
+      normalizePositionalSourceIdentity(grainB ?? "") &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["grouping"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["grouping"]),
+    )
+  ) {
     return null;
   }
 
@@ -1287,7 +1393,22 @@ function compareBusinessLogic(
   queryB: ParsedSqlQuery,
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    arraysEqual(
+      [...queryA.filters].map(normalizePositionalSourceIdentity).sort(),
+      [...queryB.filters].map(normalizePositionalSourceIdentity).sort(),
+    ) &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["filter"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["filter"]),
+    )
+  ) {
+    return null;
+  }
   const ignorePatterns = [
     /paid|subscription|plan|mrr|arr/i,
     /last_active|event_date|created_at|current_date|current_timestamp|interval/i,
@@ -2112,6 +2233,10 @@ export function compareMetricDefinitionsWithAnalysis(
   requireAnalyzableSqlInput(normalizedInputB, "B");
   const parsedA = tokenizeSql(normalizedInputA.query, overrides.structureA);
   const parsedB = tokenizeSql(normalizedInputB.query, overrides.structureB);
+  const sourceRoles = buildSourceRoleComparison(
+    getSqlStructure(parsedA).syntax,
+    getSqlStructure(parsedB).syntax,
+  );
   const profileA = buildSemanticProfile(parsedA);
   const profileB = buildSemanticProfile(parsedB);
   const likelyBusinessMeaningA = buildBusinessMeaningSummary(parsedA, profileA);
@@ -2125,7 +2250,11 @@ export function compareMetricDefinitionsWithAnalysis(
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   detectedDifferences.push(...compareSetOperations(parsedA, parsedB));
   detectedDifferences.push(...compareWindowSpecifications(parsedA, parsedB));
-  pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareAggregation(parsedA, parsedB, sourceRoles),
+  );
+  detectedDifferences.push(...compareSourceRoleUsages(sourceRoles));
   pushDifference(
     detectedDifferences,
     compareCaseCollections(getSqlStructure(parsedA).root, getSqlStructure(parsedB).root),
@@ -2133,13 +2262,22 @@ export function compareMetricDefinitionsWithAnalysis(
   detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
-  pushDifference(detectedDifferences, compareJoinPredicates(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareJoinPredicates(parsedA, parsedB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));
-  pushDifference(detectedDifferences, compareReportingGrain(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareReportingGrain(parsedA, parsedB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
   pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
   pushDifference(detectedDifferences, compareFilterBooleanLogic(parsedA, parsedB));
-  pushDifference(detectedDifferences, compareBusinessLogic(parsedA, parsedB, profileA, profileB));
+  pushDifference(
+    detectedDifferences,
+    compareBusinessLogic(parsedA, parsedB, profileA, profileB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareDescriptions(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareTeamContext(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareIntendedUse(normalizedInputA, normalizedInputB));
