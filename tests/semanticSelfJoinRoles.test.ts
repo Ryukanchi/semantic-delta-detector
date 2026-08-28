@@ -62,6 +62,43 @@ test("commutative join operands and conjunct order do not redefine source roles"
   );
 });
 
+test("qualified window keys follow self-join roles across alias renames", () => {
+  assertEquivalentSelfJoin(
+    `SELECT ROW_NUMBER() OVER (
+       PARTITION BY manager.department
+       ORDER BY manager.created_at
+     )
+     FROM users employee
+     JOIN users manager ON employee.manager_id = manager.id;`,
+    `SELECT ROW_NUMBER() OVER (
+       PARTITION BY lead.department
+       ORDER BY lead.created_at
+     )
+     FROM users lead
+     JOIN users report ON report.manager_id = lead.id;`,
+  );
+});
+
+test("CASE projections follow self-join roles across alias renames", () => {
+  const result = compareSqlQueries(
+    `SELECT CASE
+       WHEN manager.active = true THEN manager.id
+     END
+     FROM users employee
+     JOIN users manager ON employee.manager_id = manager.id;`,
+    `SELECT CASE
+       WHEN lead.active = true THEN lead.id
+     END
+     FROM users lead
+     JOIN users report ON report.manager_id = lead.id;`,
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.semantic_similarity_score, 100);
+  assert.deepEqual(result.detected_differences, []);
+  assert.match(result.parser_limitations?.join(" ") ?? "", /CASE expression/);
+});
+
 test("three occurrences of the same table are canonicalized by hierarchy role", () => {
   assertEquivalentSelfJoin(
     `SELECT COUNT(DISTINCT director.id)
@@ -158,6 +195,32 @@ test("different projection roles from the same table do not collapse", () => {
       (difference) =>
         difference.category === "business_logic_mismatch" &&
         /projection.*source role/i.test(difference.description),
+    ),
+  );
+});
+
+test("different self-join roles in a window partition do not collapse", () => {
+  const result = compareSqlQueries(
+    `SELECT ROW_NUMBER() OVER (
+       PARTITION BY manager.department
+       ORDER BY manager.created_at
+     )
+     FROM users employee
+     JOIN users manager ON employee.manager_id = manager.id;`,
+    `SELECT ROW_NUMBER() OVER (
+       PARTITION BY employee.department
+       ORDER BY manager.created_at
+     )
+     FROM users employee
+     JOIN users manager ON employee.manager_id = manager.id;`,
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        /window.*partition by/i.test(difference.description),
     ),
   );
 });

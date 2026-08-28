@@ -32,6 +32,7 @@ import {
 import {
   buildSourceRoleComparison,
   describeSourceUsages,
+  getCanonicalSourceRoleWindowSignatures,
   getSourceUsageSignatures,
   type SourceRoleComparison,
 } from "./sourceRoleCanonicalization.js";
@@ -317,13 +318,33 @@ function pairChangedWindows(
 function compareWindowSpecifications(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference[] {
-  const windowsA = getSqlStructure(queryA).syntax?.windows ?? [];
-  const windowsB = getSqlStructure(queryB).syntax?.windows ?? [];
+  const syntaxA = getSqlStructure(queryA).syntax;
+  const syntaxB = getSqlStructure(queryB).syntax;
+  const windowsA = syntaxA?.windows ?? [];
+  const windowsB = syntaxB?.windows ?? [];
   const signaturesA = windowsA.map(getWindowSummarySignature).sort();
   const signaturesB = windowsB.map(getWindowSummarySignature).sort();
   if (signaturesA.join("|") === signaturesB.join("|")) {
     return [];
+  }
+  if (sourceRoles?.safe) {
+    const roleSignaturesA = getCanonicalSourceRoleWindowSignatures(
+      syntaxA,
+      sourceRoles.analysisA,
+    );
+    const roleSignaturesB = getCanonicalSourceRoleWindowSignatures(
+      syntaxB,
+      sourceRoles.analysisB,
+    );
+    if (
+      roleSignaturesA &&
+      roleSignaturesB &&
+      arraysEqual(roleSignaturesA, roleSignaturesB)
+    ) {
+      return [];
+    }
   }
 
   const differences: DetectedDifference[] = [];
@@ -496,10 +517,39 @@ function compareCaseCollections(
   scopeA: SqlQueryScopeSummary,
   scopeB: SqlQueryScopeSummary,
   contextLabel = "",
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
   const canonicalA = scopeA.cases.map((item) => item.canonical).sort();
   const canonicalB = scopeB.cases.map((item) => item.canonical).sort();
   if (canonicalA.join("|") === canonicalB.join("|")) {
+    return null;
+  }
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    arraysEqual(
+      canonicalA.map(normalizePositionalSourceIdentity),
+      canonicalB.map(normalizePositionalSourceIdentity),
+    ) &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+      getSourceUsageSignatures(sourceRoles.analysisB, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+    )
+  ) {
     return null;
   }
 
@@ -2249,7 +2299,9 @@ export function compareMetricDefinitionsWithAnalysis(
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   detectedDifferences.push(...compareSetOperations(parsedA, parsedB));
-  detectedDifferences.push(...compareWindowSpecifications(parsedA, parsedB));
+  detectedDifferences.push(
+    ...compareWindowSpecifications(parsedA, parsedB, sourceRoles),
+  );
   pushDifference(
     detectedDifferences,
     compareAggregation(parsedA, parsedB, sourceRoles),
@@ -2257,7 +2309,12 @@ export function compareMetricDefinitionsWithAnalysis(
   detectedDifferences.push(...compareSourceRoleUsages(sourceRoles));
   pushDifference(
     detectedDifferences,
-    compareCaseCollections(getSqlStructure(parsedA).root, getSqlStructure(parsedB).root),
+    compareCaseCollections(
+      getSqlStructure(parsedA).root,
+      getSqlStructure(parsedB).root,
+      "",
+      sourceRoles,
+    ),
   );
   detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));

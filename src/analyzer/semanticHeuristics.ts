@@ -14,6 +14,7 @@ import {
 } from "../parser/sqlStructure.js";
 import {
   buildSourceRoleComparison,
+  getCanonicalSourceRoleWindowSignatures,
   getSourceUsageSignatures,
 } from "./sourceRoleCanonicalization.js";
 
@@ -406,19 +407,53 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
 
   const windowSignatureA = getWindowSpecificationSignature(structureA.syntax);
   const windowSignatureB = getWindowSpecificationSignature(structureB.syntax);
-  if (windowSignatureA !== windowSignatureB) {
+  const roleWindowSignaturesA = getCanonicalSourceRoleWindowSignatures(
+    structureA.syntax,
+    sourceRoles.analysisA,
+  );
+  const roleWindowSignaturesB = getCanonicalSourceRoleWindowSignatures(
+    structureB.syntax,
+    sourceRoles.analysisB,
+  );
+  const roleAwareWindowsMatch =
+    roleWindowSignaturesA !== null &&
+    roleWindowSignaturesB !== null &&
+    stringArraysEqual(roleWindowSignaturesA, roleWindowSignaturesB);
+  if (windowSignatureA !== windowSignatureB && !roleAwareWindowsMatch) {
     score -= 20;
   }
 
   const caseSetA = structureA.root.cases
     .map((item) => item.canonical)
-    .sort()
-    .join("|");
+    .sort();
   const caseSetB = structureB.root.cases
     .map((item) => item.canonical)
-    .sort()
-    .join("|");
-  if (caseSetA !== caseSetB) {
+    .sort();
+  const roleAwareCasesMatch =
+    roleGraphsMatch &&
+    stringArraysEqual(
+      caseSetA.map(normalizePositionalSourceIdentity),
+      caseSetB.map(normalizePositionalSourceIdentity),
+    ) &&
+    stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+      getSourceUsageSignatures(sourceRoles.analysisB, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+    );
+  if (!stringArraysEqual(caseSetA, caseSetB) && !roleAwareCasesMatch) {
     score -= 20;
   }
 

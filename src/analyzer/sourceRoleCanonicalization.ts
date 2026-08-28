@@ -394,3 +394,66 @@ export function describeSourceUsages(
       .join(", ") || "no qualified source role"
   );
 }
+
+function canonicalizeRootWindowExpression(
+  expression: string,
+  analysis: SourceRoleAnalysis,
+): string | null {
+  const match = expression.match(
+    /^([a-z_][a-z0-9_$]*)\.([a-z_][a-z0-9_$]*)$/i,
+  );
+  if (!match) {
+    return null;
+  }
+  const roles = analysis.roles.filter(
+    (role) => role.scopeId === "root" && role.qualifier === match[1].toLowerCase(),
+  );
+  return roles.length === 1
+    ? `${roles[0].signature}.${match[2].toLowerCase()}`
+    : null;
+}
+
+export function getCanonicalSourceRoleWindowSignatures(
+  syntax: SqlSyntaxSummary | undefined,
+  analysis: SourceRoleAnalysis,
+): string[] | null {
+  if (
+    !syntax ||
+    !analysis.safe ||
+    analysis.roles.some((role) => role.scopeId !== "root")
+  ) {
+    return null;
+  }
+
+  const signatures: string[] = [];
+  for (const window of syntax.windows) {
+    const partitionBy = window.partitionBy.map((expression) =>
+      canonicalizeRootWindowExpression(expression, analysis),
+    );
+    const orderBy = window.orderBy.map((item) => {
+      const expression = canonicalizeRootWindowExpression(
+        item.expression,
+        analysis,
+      );
+      if (!expression) {
+        return null;
+      }
+      const direction = item.direction ?? "asc";
+      const nulls = item.nulls ?? (direction === "asc" ? "last" : "first");
+      return `${expression}:${direction}:nulls_${nulls}`;
+    });
+    if (
+      partitionBy.some((expression) => expression === null) ||
+      orderBy.some((expression) => expression === null)
+    ) {
+      return null;
+    }
+    const frame = window.frame
+      ? `${window.frame.unit}:${window.frame.start}:${window.frame.end ?? ""}`
+      : "";
+    signatures.push(
+      `${window.functionName}(partition=${[...new Set(partitionBy)].sort().join(",")};order=${orderBy.join(",")};frame=${frame})`,
+    );
+  }
+  return signatures.sort();
+}
