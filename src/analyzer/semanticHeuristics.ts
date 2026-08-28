@@ -16,11 +16,8 @@ import {
   buildSourceRoleComparison,
   getCanonicalSourceRoleWindowSignatures,
   getSourceUsageSignatures,
+  normalizePositionalSourceIdentity,
 } from "./sourceRoleCanonicalization.js";
-
-function normalizePositionalSourceIdentity(value: string): string {
-  return value.replace(/#\d+(?=\.)/g, "");
-}
 
 function stringArraysEqual(valuesA: string[], valuesB: string[]): boolean {
   return valuesA.join("|") === valuesB.join("|");

@@ -13,6 +13,10 @@ function normalizeOperator(operator: string): string {
   return normalized === "<>" ? "!=" : normalized;
 }
 
+export function normalizePositionalSourceIdentity(value: string): string {
+  return value.replace(/#\d+(?=\.)/g, "");
+}
+
 export interface CanonicalSourceRole {
   scopeId: string;
   physicalName: string;

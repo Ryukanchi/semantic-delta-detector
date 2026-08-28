@@ -34,6 +34,7 @@ import {
   describeSourceUsages,
   getCanonicalSourceRoleWindowSignatures,
   getSourceUsageSignatures,
+  normalizePositionalSourceIdentity,
   type SourceRoleComparison,
 } from "./sourceRoleCanonicalization.js";
 import {
@@ -462,10 +463,6 @@ function compareAggregation(
 
 function arraysEqual(valuesA: string[], valuesB: string[]): boolean {
   return valuesA.join("|") === valuesB.join("|");
-}
-
-function normalizePositionalSourceIdentity(value: string): string {
-  return value.replace(/#\d+(?=\.)/g, "");
 }
 
 function compareSourceRoleUsages(
