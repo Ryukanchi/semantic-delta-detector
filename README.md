@@ -232,6 +232,26 @@ import {
 } from "semantic-delta-detector/core";
 ```
 
+Node.js consumers can opt into the enhanced PostgreSQL syntax frontend without
+changing the root or browser-safe APIs:
+
+```ts
+import {
+  compareMetricDefinitions,
+  compareSqlQueries,
+} from "semantic-delta-detector/postgresql";
+```
+
+This entrypoint keeps Semantic Delta's own SQL IR and semantic heuristics. Vendor
+AST types remain isolated inside the adapter. Parser failures and resource-limit
+failures retain the lightweight fallback result, add an explicit limitation, and
+cap confidence without lowering semantic risk found by the fallback.
+
+The synchronous parser has explicit input, AST, set-operation, window, and
+source-graph budgets, but it cannot enforce a hard wall-clock timeout without a
+Worker or process boundary. See the
+[PostgreSQL hybrid design](docs/design/postgresql-hybrid.md) for the exact limits.
+
 ## GitHub Actions preview
 
 `.github/workflows/semantic-delta-preview.yml` runs tests, builds the project, and prints a simulated PR-style report in CI logs.
@@ -251,7 +271,9 @@ Run the same browser-safe semantic core directly in VS Code:
 
 ## Current limitations
 
-- SQL understanding is heuristic; there is no full SQL AST parser.
+- SQL understanding remains heuristic. The default and browser-safe entrypoints
+  do not load a full SQL parser; the opt-in PostgreSQL entrypoint uses an isolated
+  syntax parser but keeps Semantic Delta's own IR and heuristics.
 - Selected CTE, derived-table, subquery, alias, CASE, join-predicate, and Boolean-grouping patterns are structurally modeled, but complex or dialect-specific forms remain only partially understood.
 - Query scopes are compared heuristically by reachable structure; this is not full name resolution, lineage analysis, or logical-equivalence proof.
 - Added and deleted metrics are observable but do not yet receive semantic risk.
