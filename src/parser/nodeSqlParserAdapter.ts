@@ -258,9 +258,23 @@ function extractWindowSummary(node: Record<string, unknown>): SqlWindowSummary {
             if (direction && direction !== "asc" && direction !== "desc") {
               throw new Error("encountered an unsupported window order direction");
             }
+            const nullsValue = readString(entry.nulls)?.toLowerCase();
+            if (
+              nullsValue &&
+              nullsValue !== "nulls first" &&
+              nullsValue !== "nulls last"
+            ) {
+              throw new Error("encountered an unsupported window NULLS ordering");
+            }
             return {
               expression: formatExpression(entry.expr),
               direction: direction === "asc" || direction === "desc" ? direction : null,
+              nulls:
+                nullsValue === "nulls first"
+                  ? "first"
+                  : nullsValue === "nulls last"
+                    ? "last"
+                    : null,
             };
           })
         : (() => {

@@ -10,6 +10,7 @@ import {
   getReachableSemanticSignals,
   getSetOperationSignature,
   getSqlStructure,
+  getWindowSpecificationSignature,
 } from "../parser/sqlStructure.js";
 
 function containsAny(text: string, keywords: string[]): boolean {
@@ -21,13 +22,69 @@ function containsPattern(text: string, pattern: RegExp): boolean {
   return pattern.test(text.toLowerCase());
 }
 
+function stripWindowSpecificationClauses(input: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < input.length) {
+    const match = /\bover\s*\(/i.exec(input.slice(cursor));
+    if (!match) {
+      result += input.slice(cursor);
+      break;
+    }
+
+    const clauseStart = cursor + match.index;
+    const openingIndex = clauseStart + match[0].lastIndexOf("(");
+    result += input.slice(cursor, clauseStart);
+    let depth = 0;
+    let quote: "'" | '"' | null = null;
+    let closingIndex = -1;
+    for (let index = openingIndex; index < input.length; index += 1) {
+      const current = input[index];
+      const next = input[index + 1];
+      if (quote) {
+        if (current === quote && next === quote) {
+          index += 1;
+        } else if (current === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (current === "'" || current === '"') {
+        quote = current;
+      } else if (current === "(") {
+        depth += 1;
+      } else if (current === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          closingIndex = index;
+          break;
+        }
+      }
+    }
+
+    if (closingIndex < 0) {
+      return input;
+    }
+    cursor = closingIndex + 1;
+  }
+
+  return result.replace(/\s+/g, " ").trim();
+}
+
 function findSignal(query: ParsedSqlQuery): string[] {
   const structure = getSqlStructure(query);
-  return [
+  const signals = [
     ...query.filters,
     ...query.timeWindows,
     ...getReachableSemanticSignals(structure.root),
-  ].map((value) => value.toLowerCase());
+  ];
+  return signals.map((value) =>
+    (structure.syntax?.windows.length
+      ? stripWindowSpecificationClauses(value)
+      : value
+    ).toLowerCase(),
+  );
 }
 
 function getJoinedSignals(query: ParsedSqlQuery): string {
@@ -314,6 +371,12 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
     structureB.syntax?.setExpression,
   );
   if (setOperationSignatureA !== setOperationSignatureB) {
+    score -= 20;
+  }
+
+  const windowSignatureA = getWindowSpecificationSignature(structureA.syntax);
+  const windowSignatureB = getWindowSpecificationSignature(structureB.syntax);
+  if (windowSignatureA !== windowSignatureB) {
     score -= 20;
   }
 

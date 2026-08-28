@@ -75,6 +75,7 @@ export type SqlSetExpressionSummary = SqlSetQuerySummary | SqlSetOperationSummar
 export interface SqlWindowOrderSummary {
   expression: string;
   direction: "asc" | "desc" | null;
+  nulls: "first" | "last" | null;
 }
 
 export interface SqlWindowFrameSummary {
@@ -1382,18 +1383,33 @@ export function getWindowSpecificationSignature(
   }
 
   return syntax.windows
-    .map((window) => {
-      const partition = [...window.partitionBy].sort().join(",");
-      const order = window.orderBy
-        .map((item) => `${item.expression}:${item.direction ?? "default"}`)
-        .join(",");
-      const frame = window.frame
-        ? `${window.frame.unit}:${window.frame.start}:${window.frame.end ?? ""}`
-        : "";
-      return `${window.functionName}(partition=${partition};order=${order};frame=${frame})`;
-    })
+    .map(getWindowSummarySignature)
     .sort()
     .join("|");
+}
+
+export function getWindowPartitionSignature(window: SqlWindowSummary): string {
+  return [...new Set(window.partitionBy)].sort().join(",");
+}
+
+export function getWindowOrderSignature(window: SqlWindowSummary): string {
+  return window.orderBy
+    .map((item) => {
+      const direction = item.direction ?? "asc";
+      const nulls = item.nulls ?? (direction === "asc" ? "last" : "first");
+      return `${item.expression}:${direction}:nulls_${nulls}`;
+    })
+    .join(",");
+}
+
+export function getWindowFrameSignature(window: SqlWindowSummary): string {
+  return window.frame
+    ? `${window.frame.unit}:${window.frame.start}:${window.frame.end ?? ""}`
+    : "";
+}
+
+export function getWindowSummarySignature(window: SqlWindowSummary): string {
+  return `${window.functionName}(partition=${getWindowPartitionSignature(window)};order=${getWindowOrderSignature(window)};frame=${getWindowFrameSignature(window)})`;
 }
 
 export function getSourceGraphSignature(

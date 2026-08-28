@@ -8,10 +8,15 @@ import {
   getSetOperationBranches,
   getSetOperationOperators,
   getSqlStructure,
+  getWindowFrameSignature,
+  getWindowOrderSignature,
+  getWindowPartitionSignature,
+  getWindowSummarySignature,
   type ReachableNestedScope,
   type SqlAggregationSummary,
   type SqlQueryScopeSummary,
   type SqlStructureSummary,
+  type SqlWindowSummary,
 } from "../parser/sqlStructure.js";
 import {
   analyzeParserLimitations,
@@ -197,6 +202,175 @@ function compareSetOperations(
       description: `The ${describeBranchPosition(index)} set-operation branch changes its source from ${sourcesA.join(", ") || "no physical table"} to ${sourcesB.join(", ") || "no physical table"}. This changes the population contributed by that branch.`,
       impact: "high",
     });
+  }
+
+  return differences;
+}
+
+function formatWindowFunctionName(functionName: string): string {
+  return functionName.toUpperCase();
+}
+
+function formatWindowPartition(window: SqlWindowSummary): string {
+  return [...new Set(window.partitionBy)].sort().join(", ") || "no partition";
+}
+
+function formatWindowOrder(window: SqlWindowSummary): string {
+  return (
+    window.orderBy
+      .map((item) => {
+        const direction = item.direction ?? "asc";
+        const nulls = item.nulls ?? (direction === "asc" ? "last" : "first");
+        return `${item.expression} ${direction.toUpperCase()} NULLS ${nulls.toUpperCase()}`;
+      })
+      .join(", ") || "no ordering"
+  );
+}
+
+function formatWindowFrame(window: SqlWindowSummary): string {
+  if (!window.frame) {
+    return "the default frame";
+  }
+
+  const unit = window.frame.unit.toUpperCase();
+  const start = window.frame.start.toUpperCase();
+  return window.frame.end
+    ? `${unit} BETWEEN ${start} AND ${window.frame.end.toUpperCase()}`
+    : `${unit} ${start}`;
+}
+
+function getWindowPairingCost(
+  windowA: SqlWindowSummary,
+  windowB: SqlWindowSummary,
+): number {
+  let cost = windowA.functionName === windowB.functionName ? 0 : 8;
+  if (
+    getWindowPartitionSignature(windowA) !==
+    getWindowPartitionSignature(windowB)
+  ) {
+    cost += 1;
+  }
+  if (getWindowOrderSignature(windowA) !== getWindowOrderSignature(windowB)) {
+    cost += 1;
+  }
+  if (getWindowFrameSignature(windowA) !== getWindowFrameSignature(windowB)) {
+    cost += 1;
+  }
+  return cost;
+}
+
+interface WindowPair {
+  windowA: SqlWindowSummary;
+  windowB: SqlWindowSummary;
+}
+
+function pairChangedWindows(
+  windowsA: SqlWindowSummary[],
+  windowsB: SqlWindowSummary[],
+): WindowPair[] {
+  const unmatchedA = [...windowsA].sort((first, second) =>
+    getWindowSummarySignature(first).localeCompare(
+      getWindowSummarySignature(second),
+    ),
+  );
+  const unmatchedB = [...windowsB].sort((first, second) =>
+    getWindowSummarySignature(first).localeCompare(
+      getWindowSummarySignature(second),
+    ),
+  );
+
+  for (let index = unmatchedA.length - 1; index >= 0; index -= 1) {
+    const signature = getWindowSummarySignature(unmatchedA[index]);
+    const exactIndex = unmatchedB.findIndex(
+      (window) => getWindowSummarySignature(window) === signature,
+    );
+    if (exactIndex >= 0) {
+      unmatchedA.splice(index, 1);
+      unmatchedB.splice(exactIndex, 1);
+    }
+  }
+
+  const pairs: WindowPair[] = [];
+  while (unmatchedA.length > 0 && unmatchedB.length > 0) {
+    const windowA = unmatchedA.shift() as SqlWindowSummary;
+    let bestIndex = 0;
+    let bestCost = getWindowPairingCost(windowA, unmatchedB[0]);
+    for (let index = 1; index < unmatchedB.length; index += 1) {
+      const candidateCost = getWindowPairingCost(windowA, unmatchedB[index]);
+      if (candidateCost < bestCost) {
+        bestCost = candidateCost;
+        bestIndex = index;
+      }
+    }
+    const [windowB] = unmatchedB.splice(bestIndex, 1);
+    pairs.push({ windowA, windowB });
+  }
+  return pairs;
+}
+
+function compareWindowSpecifications(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference[] {
+  const windowsA = getSqlStructure(queryA).syntax?.windows ?? [];
+  const windowsB = getSqlStructure(queryB).syntax?.windows ?? [];
+  const signaturesA = windowsA.map(getWindowSummarySignature).sort();
+  const signaturesB = windowsB.map(getWindowSummarySignature).sort();
+  if (signaturesA.join("|") === signaturesB.join("|")) {
+    return [];
+  }
+
+  const differences: DetectedDifference[] = [];
+  if (windowsA.length !== windowsB.length) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The window expression count changed from ${windowsA.length} to ${windowsB.length}. Adding or removing a window calculation changes which ranked, offset, or rolling values the query produces.`,
+      impact: "high",
+    });
+  }
+
+  for (const { windowA, windowB } of pairChangedWindows(windowsA, windowsB)) {
+    const functionA = formatWindowFunctionName(windowA.functionName);
+    const functionB = formatWindowFunctionName(windowB.functionName);
+    const functionLabel =
+      windowA.functionName === windowB.functionName
+        ? `${functionA} window`
+        : `${functionA}/${functionB} window`;
+
+    if (windowA.functionName !== windowB.functionName) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The window function changes from ${functionA} to ${functionB}. Different window functions can produce different rankings, offsets, or aggregates even when their window specification is unchanged.`,
+        impact: "high",
+      });
+    }
+
+    if (
+      getWindowPartitionSignature(windowA) !==
+      getWindowPartitionSignature(windowB)
+    ) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its PARTITION BY definition from ${formatWindowPartition(windowA)} to ${formatWindowPartition(windowB)}. This changes which rows are ranked or aggregated together inside each window partition.`,
+        impact: "high",
+      });
+    }
+
+    if (getWindowOrderSignature(windowA) !== getWindowOrderSignature(windowB)) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its ORDER BY definition from ${formatWindowOrder(windowA)} to ${formatWindowOrder(windowB)}. This changes the ordering used for ranking, offsets, or cumulative window calculations.`,
+        impact: "high",
+      });
+    }
+
+    if (getWindowFrameSignature(windowA) !== getWindowFrameSignature(windowB)) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its frame from ${formatWindowFrame(windowA)} to ${formatWindowFrame(windowB)}. This changes which rows contribute to the window result for each current row.`,
+        impact: "high",
+      });
+    }
   }
 
   return differences;
@@ -1950,6 +2124,7 @@ export function compareMetricDefinitionsWithAnalysis(
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
   detectedDifferences.push(...compareSetOperations(parsedA, parsedB));
+  detectedDifferences.push(...compareWindowSpecifications(parsedA, parsedB));
   pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
   pushDifference(
     detectedDifferences,
