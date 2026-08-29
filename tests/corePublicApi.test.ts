@@ -18,6 +18,12 @@ const expectedRuntimeExports = [
   "compareSqlQueries",
 ] as const;
 
+const expectedPostgresqlRuntimeExports = [
+  ...expectedRuntimeExports,
+  "compareMetricDefinitionsIsolated",
+  "compareSqlQueriesIsolated",
+] as const;
+
 const forbiddenGitExports = [
   "compareGitChanges",
   "discoverGitChangedFiles",
@@ -100,15 +106,24 @@ test("core exposes only the browser-safe semantic runtime API", () => {
   assert.equal(result.risk_level, "low");
 });
 
-test("the PostgreSQL opt-in entrypoint preserves the semantic runtime API shape", () => {
+test("the PostgreSQL opt-in entrypoint preserves sync APIs and adds isolated APIs", () => {
   assert.deepEqual(
     Object.keys(postgresqlApi).sort(),
-    [...expectedRuntimeExports].sort(),
+    [...expectedPostgresqlRuntimeExports].sort(),
   );
-  for (const exportName of expectedRuntimeExports) {
+  for (const exportName of expectedPostgresqlRuntimeExports) {
     assert.equal(typeof postgresqlApi[exportName], "function");
   }
   assert.notEqual(postgresqlApi.compareSqlQueries, coreApi.compareSqlQueries);
+  assert.equal("compareSqlQueriesIsolated" in coreApi, false);
+  assert.equal("compareSqlQueriesIsolated" in rootApi, false);
+  assert.equal(
+    postgresqlApi.compareSqlQueries(
+      "SELECT COUNT(*) FROM users",
+      "SELECT COUNT(*) FROM users",
+    ) instanceof Promise,
+    false,
+  );
 });
 
 test("package metadata exposes the core runtime and declarations", () => {
@@ -168,6 +183,14 @@ test("package exports block PostgreSQL adapter internals", async () => {
   );
   await assert.rejects(
     import("semantic-delta-detector/internal/enhancedSqlComparisonRuntime"),
+    /Package subpath .* is not defined by "exports"/,
+  );
+  await assert.rejects(
+    import("semantic-delta-detector/internal/postgresqlParserIsolation"),
+    /Package subpath .* is not defined by "exports"/,
+  );
+  await assert.rejects(
+    import("semantic-delta-detector/internal/postgresqlParserWorker"),
     /Package subpath .* is not defined by "exports"/,
   );
 });

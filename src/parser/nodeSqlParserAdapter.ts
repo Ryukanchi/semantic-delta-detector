@@ -4,6 +4,7 @@ import type {
   SqlSetBranchSourceSummary,
   SqlSetExpressionSummary,
   SqlSetOperator,
+  SqlSetQuerySummary,
   SqlSourceOccurrenceSummary,
   SqlSourceUsageContext,
   SqlSourceUsageSummary,
@@ -58,11 +59,31 @@ function assertSqlInputWithinResourceBudget(sql: string): void {
   }
 }
 
+function isVendorSetOperationContinuation(
+  parent: Record<string, unknown>,
+  key: string,
+  child: unknown,
+): child is Record<string, unknown> {
+  // node-sql-parser models a linear set chain as horizontal SELECT._next links.
+  // Keep the surrounding depth for that one link; every branch child still adds depth.
+  return (
+    key === "_next" &&
+    parent.type === "select" &&
+    typeof parent.set_op === "string" &&
+    isRecord(child) &&
+    child.type === "select"
+  );
+}
+
 function assertVendorAstWithinResourceBudget(root: unknown): void {
   const seen = new Set<object>();
   let nodeCount = 0;
+  const pending: Array<{ value: unknown; depth: number }> = [
+    { value: root, depth: 0 },
+  ];
 
-  const visit = (value: unknown, depth: number): void => {
+  while (pending.length > 0) {
+    const { value, depth } = pending.pop()!;
     if (depth > postgresqlParserResourceLimits.maxAstDepth) {
       throw new Error(
         `vendor AST depth exceeds the ${postgresqlParserResourceLimits.maxAstDepth} level resource limit`,
@@ -75,7 +96,7 @@ function assertVendorAstWithinResourceBudget(root: unknown): void {
         );
       }
       if (seen.has(value)) {
-        return;
+        continue;
       }
       seen.add(value);
       nodeCount += 1;
@@ -85,12 +106,12 @@ function assertVendorAstWithinResourceBudget(root: unknown): void {
         );
       }
       for (const item of value) {
-        visit(item, depth + 1);
+        pending.push({ value: item, depth: depth + 1 });
       }
-      return;
+      continue;
     }
     if (!isRecord(value) || seen.has(value)) {
-      return;
+      continue;
     }
     seen.add(value);
     nodeCount += 1;
@@ -105,12 +126,15 @@ function assertVendorAstWithinResourceBudget(root: unknown): void {
         `vendor AST object exceeds the ${postgresqlParserResourceLimits.maxListItems} property resource limit`,
       );
     }
-    for (const [, child] of entries) {
-      visit(child, depth + 1);
+    for (const [key, child] of entries) {
+      pending.push({
+        value: child,
+        depth: isVendorSetOperationContinuation(value, key, child)
+          ? depth
+          : depth + 1,
+      });
     }
-  };
-
-  visit(root, 0);
+  }
 }
 
 function readString(value: unknown): string | null {
@@ -226,40 +250,53 @@ function normalizeSetOperator(value: unknown): SqlSetOperator {
 
 function buildSetExpression(
   statement: Record<string, unknown>,
-  budget = { branchCount: 0 },
-  depth = 0,
 ): SqlSetExpressionSummary {
-  if (depth > postgresqlParserResourceLimits.maxAstDepth) {
-    throw new Error("set-operation nesting exceeds the AST depth resource limit");
-  }
-  budget.branchCount += 1;
-  if (
-    budget.branchCount >
-    postgresqlParserResourceLimits.maxSetOperationBranches
-  ) {
-    throw new Error(
-      `set-operation branch count exceeds the ${postgresqlParserResourceLimits.maxSetOperationBranches} branch resource limit`,
-    );
+  const branches: Array<{
+    query: SqlSetQuerySummary;
+    operator: SqlSetOperator | null;
+  }> = [];
+  let currentStatement = statement;
+
+  while (true) {
+    if (
+      branches.length >=
+      postgresqlParserResourceLimits.maxSetOperationBranches
+    ) {
+      throw new Error(
+        `set-operation branch count exceeds the ${postgresqlParserResourceLimits.maxSetOperationBranches} branch resource limit`,
+      );
+    }
+
+    const query: SqlSetQuerySummary = {
+      kind: "query",
+      sources: extractBranchSources(currentStatement),
+    };
+    const nextStatement = currentStatement._next;
+    if (nextStatement === null || nextStatement === undefined) {
+      branches.push({ query, operator: null });
+      break;
+    }
+    if (!isRecord(nextStatement)) {
+      throw new Error("encountered an unsupported set-operation branch");
+    }
+
+    branches.push({
+      query,
+      operator: normalizeSetOperator(currentStatement.set_op),
+    });
+    currentStatement = nextStatement;
   }
 
-  const query: SqlSetExpressionSummary = {
-    kind: "query",
-    sources: extractBranchSources(statement),
-  };
-  if (statement._next === null || statement._next === undefined) {
-    return query;
+  let expression: SqlSetExpressionSummary = branches.at(-1)!.query;
+  for (let index = branches.length - 2; index >= 0; index -= 1) {
+    expression = {
+      kind: "set_operation",
+      operator: branches[index].operator!,
+      left: branches[index].query,
+      right: expression,
+    };
   }
-
-  if (!isRecord(statement._next)) {
-    throw new Error("encountered an unsupported set-operation branch");
-  }
-
-  return {
-    kind: "set_operation",
-    operator: normalizeSetOperator(statement.set_op),
-    left: query,
-    right: buildSetExpression(statement._next, budget, depth + 1),
-  };
+  return expression;
 }
 
 function readWindowFrame(value: unknown): SqlWindowFrameSummary | null {
@@ -382,17 +419,27 @@ function collectWindows(root: unknown): SqlWindowSummary[] {
   const windows: SqlWindowSummary[] = [];
   const seen = new Set<object>();
   let nodeCount = 0;
+  const pending: Array<{ value: unknown; depth: number }> = [
+    { value: root, depth: 0 },
+  ];
 
-  const visit = (value: unknown, depth: number): void => {
+  while (pending.length > 0) {
+    const { value, depth } = pending.pop()!;
     if (depth > postgresqlParserResourceLimits.maxAstDepth) {
       throw new Error("window traversal exceeds the AST depth resource limit");
     }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
+      if (seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      for (const item of value) {
+        pending.push({ value: item, depth: depth + 1 });
+      }
+      continue;
     }
     if (!isRecord(value) || seen.has(value)) {
-      return;
+      continue;
     }
     seen.add(value);
     nodeCount += 1;
@@ -413,11 +460,16 @@ function collectWindows(root: unknown): SqlWindowSummary[] {
     }
 
     for (const [key, child] of Object.entries(value)) {
-      if (key !== "loc") visit(child, depth + 1);
+      if (key !== "loc") {
+        pending.push({
+          value: child,
+          depth: isVendorSetOperationContinuation(value, key, child)
+            ? depth
+            : depth + 1,
+        });
+      }
     }
-  };
-
-  visit(root, 0);
+  }
   return windows;
 }
 

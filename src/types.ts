@@ -87,6 +87,11 @@ export interface MetricDefinitionInput {
   intended_use?: string;
 }
 
+export interface IsolatedPostgresqlComparisonOptions {
+  /** Wall-clock budget for Worker startup, vendor parsing, IR mapping, and transfer. */
+  timeoutMs?: number;
+}
+
 export interface SemanticComparisonResult {
   metric_name_a: string;
   metric_name_b: string;

@@ -3,26 +3,31 @@ import {
 } from "../analyzer/differenceEngine.js";
 import { analyzeSourceRoles } from "../analyzer/sourceRoleCanonicalization.js";
 import { nodeSqlPostgresqlParser } from "../parser/nodeSqlParserAdapter.js";
+import type { ExternalSqlParseResult } from "../parser/externalSqlParser.js";
 import {
   analyzeSqlStructure,
   type SqlStructureSummary,
 } from "../parser/sqlStructure.js";
 import type {
+  IsolatedPostgresqlComparisonOptions,
   MetricDefinitionInput,
   SemanticComparisonResult,
 } from "../types.js";
+import {
+  runIsolatedPostgresqlParser,
+  type PostgresqlParserIsolationHarness,
+} from "./postgresqlParserIsolation.js";
 
 interface EnhancedStructureResult {
   structure: SqlStructureSummary;
   analysisLimitations: string[];
 }
 
-function analyzePostgresqlStructure(
-  sql: string,
+function enhancePostgresqlStructure(
+  fallbackStructure: SqlStructureSummary,
+  externalResult: ExternalSqlParseResult,
   queryLabel: "A" | "B",
 ): EnhancedStructureResult {
-  const fallbackStructure = analyzeSqlStructure(sql);
-  const externalResult = nodeSqlPostgresqlParser.parse(sql);
   if (externalResult.ok) {
     const sourceRoleAnalysis = analyzeSourceRoles(externalResult.syntax);
     return {
@@ -48,12 +53,23 @@ function analyzePostgresqlStructure(
   };
 }
 
-export function comparePostgresqlMetricDefinitions(
+function analyzePostgresqlStructure(
+  sql: string,
+  queryLabel: "A" | "B",
+): EnhancedStructureResult {
+  return enhancePostgresqlStructure(
+    analyzeSqlStructure(sql),
+    nodeSqlPostgresqlParser.parse(sql),
+    queryLabel,
+  );
+}
+
+function compareEnhancedStructures(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
+  enhancedA: EnhancedStructureResult,
+  enhancedB: EnhancedStructureResult,
 ): SemanticComparisonResult {
-  const enhancedA = analyzePostgresqlStructure(inputA.query, "A");
-  const enhancedB = analyzePostgresqlStructure(inputB.query, "B");
   const parserLimitations = [
     ...enhancedA.analysisLimitations,
     ...enhancedB.analysisLimitations,
@@ -68,9 +84,69 @@ export function comparePostgresqlMetricDefinitions(
   });
 }
 
+export function comparePostgresqlMetricDefinitions(
+  inputA: MetricDefinitionInput,
+  inputB: MetricDefinitionInput,
+): SemanticComparisonResult {
+  const enhancedA = analyzePostgresqlStructure(inputA.query, "A");
+  const enhancedB = analyzePostgresqlStructure(inputB.query, "B");
+  return compareEnhancedStructures(inputA, inputB, enhancedA, enhancedB);
+}
+
 export function comparePostgresqlSqlQueries(
   queryA: string,
   queryB: string,
 ): SemanticComparisonResult {
   return comparePostgresqlMetricDefinitions({ query: queryA }, { query: queryB });
+}
+
+export async function comparePostgresqlMetricDefinitionsIsolated(
+  inputA: MetricDefinitionInput,
+  inputB: MetricDefinitionInput,
+  options: IsolatedPostgresqlComparisonOptions = {},
+  isolationHarness?: PostgresqlParserIsolationHarness,
+): Promise<SemanticComparisonResult> {
+  const fallbackA = analyzeSqlStructure(inputA.query);
+  const fallbackB = analyzeSqlStructure(inputB.query);
+  const isolatedResult = await runIsolatedPostgresqlParser(
+    [inputA.query, inputB.query],
+    options,
+    isolationHarness,
+  );
+  const externalResults: [ExternalSqlParseResult, ExternalSqlParseResult] =
+    isolatedResult.ok
+      ? isolatedResult.results
+      : [
+          {
+            ok: false,
+            dialect: "postgresql",
+            reason: isolatedResult.reason,
+          },
+          {
+            ok: false,
+            dialect: "postgresql",
+            reason: isolatedResult.reason,
+          },
+        ];
+
+  return compareEnhancedStructures(
+    inputA,
+    inputB,
+    enhancePostgresqlStructure(fallbackA, externalResults[0], "A"),
+    enhancePostgresqlStructure(fallbackB, externalResults[1], "B"),
+  );
+}
+
+export function comparePostgresqlSqlQueriesIsolated(
+  queryA: string,
+  queryB: string,
+  options: IsolatedPostgresqlComparisonOptions = {},
+  isolationHarness?: PostgresqlParserIsolationHarness,
+): Promise<SemanticComparisonResult> {
+  return comparePostgresqlMetricDefinitionsIsolated(
+    { query: queryA },
+    { query: queryB },
+    options,
+    isolationHarness,
+  );
 }
