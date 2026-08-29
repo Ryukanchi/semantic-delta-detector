@@ -30,7 +30,7 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "compare": "tsx src/cli.ts",
-    "example": "tsx src/cli.ts --example login-vs-paid",
+    "example": "tsx src/cli.ts --example unique-login-users-vs-login-event-rows",
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "bin": {

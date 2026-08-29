@@ -135,6 +135,7 @@ test("package metadata exposes the core runtime and declarations", () => {
     repository?: { type: string; url: string };
     homepage?: string;
     bugs?: { url: string };
+    scripts?: Record<string, string>;
   };
 
   assert.deepEqual(packageJson.exports["./core"], {
@@ -162,6 +163,10 @@ test("package metadata exposes the core runtime and declarations", () => {
   assert.deepEqual(packageJson.bugs, {
     url: "https://github.com/Ryukanchi/semantic-delta-detector/issues",
   });
+  assert.equal(
+    packageJson.scripts?.example,
+    "tsx src/cli.ts --example unique-login-users-vs-login-event-rows",
+  );
   assert.equal(
     fileURLToPath(import.meta.resolve("semantic-delta-detector/core")),
     resolve(projectRoot, "dist/core.js"),
