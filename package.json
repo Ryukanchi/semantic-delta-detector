@@ -22,6 +22,7 @@
   "files": [
     "dist",
     "docs/assets/*.png",
+    "docs/design/git-discovery.md",
     "docs/design/postgresql-hybrid.md"
   ],
   "scripts": {
@@ -41,6 +42,14 @@
     "metrics",
     "semantic-analysis"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ryukanchi/semantic-delta-detector.git"
+  },
+  "homepage": "https://github.com/Ryukanchi/semantic-delta-detector#readme",
+  "bugs": {
+    "url": "https://github.com/Ryukanchi/semantic-delta-detector/issues"
+  },
   "license": "MIT",
   "packageManager": "pnpm@10.0.0",
   "devDependencies": {

@@ -132,6 +132,9 @@ test("package metadata exposes the core runtime and declarations", () => {
   ) as {
     exports: Record<string, { types: string; import: string }>;
     files?: string[];
+    repository?: { type: string; url: string };
+    homepage?: string;
+    bugs?: { url: string };
   };
 
   assert.deepEqual(packageJson.exports["./core"], {
@@ -145,8 +148,20 @@ test("package metadata exposes the core runtime and declarations", () => {
   assert.deepEqual(packageJson.files, [
     "dist",
     "docs/assets/*.png",
+    "docs/design/git-discovery.md",
     "docs/design/postgresql-hybrid.md",
   ]);
+  assert.deepEqual(packageJson.repository, {
+    type: "git",
+    url: "git+https://github.com/Ryukanchi/semantic-delta-detector.git",
+  });
+  assert.equal(
+    packageJson.homepage,
+    "https://github.com/Ryukanchi/semantic-delta-detector#readme",
+  );
+  assert.deepEqual(packageJson.bugs, {
+    url: "https://github.com/Ryukanchi/semantic-delta-detector/issues",
+  });
   assert.equal(
     fileURLToPath(import.meta.resolve("semantic-delta-detector/core")),
     resolve(projectRoot, "dist/core.js"),

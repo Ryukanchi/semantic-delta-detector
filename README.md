@@ -20,13 +20,21 @@ Two dashboards can both show “active users” while measuring different popula
 
 The SQL may look similar, but the resulting KPIs are not interchangeable. Semantic Delta surfaces that difference before it becomes misleading reporting or a bad product, finance, or growth decision.
 
-## Quick start
+## Installation and quick start
 
-The repository uses pnpm 10 and is tested in CI with Node.js 24.
+Semantic Delta is tested in CI with Node.js 24. Install it in a Node.js project:
 
 ```bash
-pnpm install
-pnpm run compare -- --example unique-login-users-vs-login-event-rows --pr
+npm install semantic-delta-detector
+```
+
+The package is ESM-only. Use `import` with the root, `/core`, or `/postgresql`
+entrypoint; CommonJS `require()` is not part of the v1.0 contract.
+
+Run a bundled end-to-end example through the installed CLI:
+
+```bash
+npx semantic-delta-detector --example unique-login-users-vs-login-event-rows --pr
 ```
 
 Example result:
@@ -43,10 +51,10 @@ Recommendation: Confirm whether the metric is intended to count users or events.
 
 ## Compare changed SQL between Git refs
 
-The primary MVP workflow compares changed SQL files between two local Git refs:
+The primary workflow compares changed SQL files between two local Git refs:
 
 ```bash
-pnpm run compare -- \
+npx semantic-delta-detector \
   --changed-from origin/main \
   --changed-to HEAD \
   --repo ../analytics-repo
@@ -84,13 +92,13 @@ When no `include` rules are configured, Git mode considers `**/*.sql`. `ignore` 
 ### Readable aggregate report
 
 ```bash
-pnpm run compare -- --changed-from origin/main --changed-to HEAD
+npx semantic-delta-detector --changed-from origin/main --changed-to HEAD
 ```
 
 ### Simulated PR-style report
 
 ```bash
-pnpm run compare -- --changed-from origin/main --changed-to HEAD --pr
+npx semantic-delta-detector --changed-from origin/main --changed-to HEAD --pr
 ```
 
 This prints a concise preview only. It does not post a pull-request comment or call the GitHub API.
@@ -98,7 +106,7 @@ This prints a concise preview only. It does not post a pull-request comment or c
 ### Complete JSON report
 
 ```bash
-pnpm run --silent compare -- \
+npx semantic-delta-detector \
   --changed-from origin/main \
   --changed-to HEAD \
   --format json
@@ -109,7 +117,7 @@ JSON retains resolved refs, analyzed findings, skipped records, warnings, and ac
 ### Optional severity gating
 
 ```bash
-pnpm run compare -- \
+npx semantic-delta-detector \
   --changed-from origin/main \
   --changed-to HEAD \
   --fail-on high
@@ -148,21 +156,21 @@ Semantic Delta also supports explicit pairs and bundled examples:
 
 ```bash
 # SQL files
-pnpm run compare -- --file-a ./query-a.sql --file-b ./query-b.sql
+npx semantic-delta-detector --file-a ./query-a.sql --file-b ./query-b.sql
 
 # PR-style before/after preview
-pnpm run compare -- \
-  --before ./examples/pr-before.sql \
-  --after ./examples/pr-after.sql \
+npx semantic-delta-detector \
+  --before ./before.sql \
+  --after ./after.sql \
   --pr
 
 # Inline SQL
-pnpm run compare -- \
+npx semantic-delta-detector \
   --query-a "SELECT COUNT(DISTINCT user_id) FROM events" \
   --query-b "SELECT COUNT(*) FROM events"
 
 # Bundled low-risk example
-pnpm run compare -- --example same-de-users-formatting --pr
+npx semantic-delta-detector --example same-de-users-formatting --pr
 ```
 
 JSON metric definitions may optionally add `metric_name`, `description`, `team_context`, and `intended_use` alongside the SQL query.
@@ -188,6 +196,19 @@ Semantic Delta currently reasons about signals such as:
 | Boolean structure | Parentheses, `AND`/`OR`, or `NOT` change the qualifying population |
 
 Formatting-only or supported equivalent changes should remain low risk. The analyzer canonicalizes table-alias renames, aggregation and `GROUP BY` ordering, equality operand order, predicate ordering within the same Boolean group, double negation, and simple De Morgan forms. Source roles remain distinct for supported self-join and correlated-subquery patterns.
+
+## Risk vs confidence
+
+Risk estimates how consequential the detected semantic change could be. Confidence
+describes how complete and reliable the analysis is for the SQL constructs and
+context available. Risk and confidence are independent: a parser limitation can
+produce a high-risk, low-confidence result when the lightweight fallback still
+detects a dangerous change. A low-risk, low-confidence result is not proof of
+equivalence; its `parser_limitations` must be reviewed.
+
+The CLI's `--fail-on` gate uses risk, not confidence. Confidence caps never erase
+detected risk, and parser or resource failures are exposed instead of being
+reported as silent equivalence.
 
 Trustworthiness guardrails keep uncertainty explicit:
 
@@ -221,6 +242,14 @@ import {
   compareMetricDefinitions,
   compareSqlQueries,
 } from "semantic-delta-detector";
+
+const result = compareSqlQueries(
+  "SELECT COUNT(DISTINCT user_id) FROM events",
+  "SELECT COUNT(*) FROM events",
+);
+
+console.log(result.risk_level);       // "high"
+console.log(result.confidence_level); // analysis confidence, independent of risk
 ```
 
 Browser and extension consumers can import the semantic engine without Node.js filesystem or subprocess dependencies:
@@ -233,13 +262,16 @@ import {
 ```
 
 Node.js consumers can opt into the enhanced PostgreSQL syntax frontend without
-changing the root or browser-safe APIs:
+changing the root or browser-safe APIs. The synchronous function runs the vendor
+parser on the calling thread:
 
 ```ts
 import {
   compareMetricDefinitions,
   compareSqlQueries,
 } from "semantic-delta-detector/postgresql";
+
+const result = compareSqlQueries(queryA, queryB);
 ```
 
 This entrypoint keeps Semantic Delta's own SQL IR and semantic heuristics. Vendor
@@ -248,9 +280,27 @@ failures retain the lightweight fallback result, add an explicit limitation, and
 cap confidence without lowering semantic risk found by the fallback.
 
 The synchronous parser has explicit input, AST, set-operation, window, and
-source-graph budgets, but it cannot enforce a hard wall-clock timeout without a
-Worker or process boundary. See the
-[PostgreSQL hybrid design](docs/design/postgresql-hybrid.md) for the exact limits.
+source-graph budgets, but it cannot interrupt a parse already in progress. For
+untrusted or operationally bounded input, use the isolated asynchronous API. It
+runs the vendor parser in a one-shot Worker and fails closed to the lightweight
+result on timeout, crash, invalid response, or parser limitation:
+
+```ts
+import {
+  compareMetricDefinitionsIsolated,
+  compareSqlQueriesIsolated,
+} from "semantic-delta-detector/postgresql";
+
+const result = await compareSqlQueriesIsolated(queryA, queryB, {
+  timeoutMs: 2_000,
+});
+```
+
+Both PostgreSQL APIs are Node.js-only and opt-in. The CLI deliberately uses the
+default lightweight analyzer; select `/postgresql` explicitly from application
+code when PostgreSQL syntax coverage or Worker isolation is required. See the
+[PostgreSQL hybrid design](docs/design/postgresql-hybrid.md) for exact budgets,
+timeout semantics, Worker lifecycle, and residual memory limits.
 
 ## GitHub Actions preview
 
@@ -272,16 +322,22 @@ Run the same browser-safe semantic core directly in VS Code:
 ## Current limitations
 
 - SQL understanding remains heuristic. The default and browser-safe entrypoints
-  do not load a full SQL parser; the opt-in PostgreSQL entrypoint uses an isolated
-  syntax parser but keeps Semantic Delta's own IR and heuristics.
+  do not load a full SQL parser; the opt-in PostgreSQL entrypoint maps external
+  parser syntax into Semantic Delta's own IR and heuristics.
 - Selected CTE, derived-table, subquery, alias, CASE, join-predicate, and Boolean-grouping patterns are structurally modeled, but complex or dialect-specific forms remain only partially understood.
 - Query scopes are compared heuristically by reachable structure; this is not full name resolution, lineage analysis, or logical-equivalence proof.
+- The synchronous PostgreSQL API cannot enforce a hard timeout. The isolated API
+  can terminate its Worker, but its V8 limits are not an operating-system RSS or
+  container memory ceiling.
 - Added and deleted metrics are observable but do not yet receive semantic risk.
 - Git mode compares committed refs, not uncommitted worktree or index changes.
 - The project does not post real pull-request comments.
 
 ## Status
 
-**Usable local Git comparison MVP with a browser-safe semantic core.**
+**Scope-frozen local semantic risk detector with a browser-safe core and opt-in PostgreSQL analysis.**
 
-The comparison engine, Git discovery boundary, aggregate reporting, configuration, JSON output, and optional gating are implemented and tested. SQL understanding remains intentionally heuristic and continues to evolve.
+The comparison engine, Git discovery boundary, aggregate reporting, configuration, JSON output, and optional gating are implemented and tested. SQL understanding remains intentionally heuristic and bounded by the documented limits.
+
+For repository development, use pnpm 10: `pnpm install --frozen-lockfile`,
+`pnpm test`, and `pnpm run build`.
