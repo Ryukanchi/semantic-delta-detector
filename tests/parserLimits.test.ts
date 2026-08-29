@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compareSqlQueries } from "../src/analyzer/differenceEngine.js";
+import {
+  compareMetricDefinitions,
+  compareSqlQueries,
+} from "../src/analyzer/differenceEngine.js";
 import { detectUnsupportedSqlConstructs } from "../src/parser/unsupportedConstructs.js";
 import { formatReadableReport } from "../src/output/formatReport.js";
 import { formatPrComment } from "../src/output/formatPrComment.js";
@@ -83,6 +86,34 @@ test("IN (SELECT ...) subquery produces an explicit limited-confidence note", ()
   assert.match(result.parser_limitations[0], /IN \(SELECT \.\.\.\) subquery/);
 });
 
+test("a scalar subquery caps confidence at low", () => {
+  assert.deepEqual(
+    detectUnsupportedSqlConstructs(
+      "SELECT (SELECT AVG(amount) FROM orders) AS benchmark FROM users",
+    ).map((item) => item.construct),
+    ["scalar_subquery"],
+  );
+
+  const result = compareMetricDefinitions(
+    {
+      query: "SELECT (SELECT AVG(amount) FROM orders) AS benchmark FROM users",
+      metric_name: "spend_benchmark",
+      description: "Average spend benchmark",
+      team_context: "analytics",
+    },
+    {
+      query: "SELECT (SELECT AVG(amount) FROM payments) AS benchmark FROM users",
+      metric_name: "spend_benchmark",
+      description: "Average spend benchmark",
+      team_context: "analytics",
+    },
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /scalar subquery/i.test(note)));
+});
+
 test("simple queries do not produce a parser limitation note", () => {
   const result = compareSqlQueries(
     "SELECT COUNT(*) FROM users WHERE country = 'DE'",
@@ -119,4 +150,102 @@ test("simple query reports do not mention analysis limits", () => {
 
   assert.doesNotMatch(formatReadableReport(result), /Analysis Limits/);
   assert.doesNotMatch(formatPrComment(result), /Note: Query/);
+});
+
+test("fully supported SQL can still produce high structured confidence", () => {
+  const result = compareMetricDefinitions(
+    {
+      query: "SELECT COUNT(DISTINCT user_id) FROM events WHERE event = 'login'",
+      metric_name: "login_users",
+      description: "Unique users who logged in",
+      team_context: "product analytics",
+    },
+    {
+      query: "SELECT SUM(amount) FROM payments WHERE status = 'paid'",
+      metric_name: "paid_revenue",
+      description: "Revenue from paid payments",
+      team_context: "finance",
+    },
+  );
+
+  assert.equal(result.parser_limitations, undefined);
+  assert.equal(result.confidence_level, "high");
+});
+
+test("a CTE limitation caps structured confidence without changing semantic risk", () => {
+  const result = compareMetricDefinitions(
+    {
+      query:
+        "WITH active AS (SELECT user_id FROM events) SELECT COUNT(*) FROM active",
+      metric_name: "active_users",
+      description: "Users with product activity",
+      team_context: "product analytics",
+    },
+    {
+      query: "SELECT SUM(amount) FROM payments WHERE status = 'paid'",
+      metric_name: "paid_revenue",
+      description: "Revenue from paid payments",
+      team_context: "finance",
+    },
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.equal(result.confidence_level, "medium");
+  assert.ok(result.parser_limitations);
+  assert.match(result.parser_limitations[0], /WITH\/CTE/);
+});
+
+test("the most restrictive parser limitation cap wins for combined constructs", () => {
+  const result = compareMetricDefinitions(
+    {
+      query: `WITH active AS (
+        SELECT user_id FROM events
+      )
+      SELECT COUNT(CASE WHEN user_id IN (SELECT user_id FROM orders) THEN 1 END)
+      FROM active`,
+      metric_name: "qualified_users",
+      description: "Users qualifying through activity and order history",
+      team_context: "product analytics",
+    },
+    {
+      query: "SELECT SUM(amount) FROM payments WHERE status = 'paid'",
+      metric_name: "paid_revenue",
+      description: "Revenue from paid payments",
+      team_context: "finance",
+    },
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations);
+  assert.match(result.parser_limitations[0], /WITH\/CTE/);
+  assert.match(result.parser_limitations[0], /CASE expression/);
+  assert.match(result.parser_limitations[0], /IN \(SELECT \.\.\.\) subquery/);
+});
+
+test("excessive nested-query depth degrades safely", () => {
+  let sql = "SELECT id FROM users";
+  for (let index = 0; index < 15; index += 1) {
+    sql = `SELECT id FROM (${sql}) nested_${index}`;
+  }
+
+  const result = compareSqlQueries(sql, sql);
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /nesting depth/i.test(note)));
+});
+
+test("excessive Boolean nesting degrades safely", () => {
+  let predicate = "flag_80 = true";
+  for (let index = 0; index < 80; index += 1) {
+    predicate = `flag_${index} = true AND (${predicate})`;
+  }
+
+  const sql = `SELECT COUNT(*) FROM users WHERE ${predicate}`;
+  const result = compareSqlQueries(sql, sql);
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.confidence_level, "low");
+  assert.ok(result.parser_limitations?.some((note) => /nesting depth/i.test(note)));
 });

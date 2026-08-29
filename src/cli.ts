@@ -165,7 +165,10 @@ function parseArgs(argv: string[]): CliOptions {
         printHelp();
         process.exit(0);
       default:
-        break;
+        if (token.startsWith("-")) {
+          throw new Error(`Unknown option: ${token}`);
+        }
+        throw new Error(`Unexpected positional argument: ${token}`);
     }
   }
 

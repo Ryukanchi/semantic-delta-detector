@@ -1,6 +1,17 @@
 import { ParsedSqlQuery, SqlJoinClause, WhereBooleanOperator } from "../types.js";
+import {
+  analyzeSqlStructure,
+  cacheSqlStructure,
+  canonicalizeSqlExpression,
+  stripSqlComments,
+  type SqlStructureSummary,
+} from "./sqlStructure.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
+
+export function hasAnalyzableSqlContent(rawQuery: string): boolean {
+  return stripSqlComments(rawQuery).replace(/;/g, "").trim().length > 0;
+}
 
 function normalizeWhitespace(input: string): string {
   return input.replace(/\s+/g, " ").trim();
@@ -208,21 +219,41 @@ function inferMetricName(query: string, tables: string[], conditions: string[]):
   return "derived_metric";
 }
 
-export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
+export function tokenizeSql(
+  rawQuery: string,
+  structure: SqlStructureSummary = analyzeSqlStructure(rawQuery),
+): ParsedSqlQuery {
   const normalizedQuery = normalizeWhitespace(rawQuery);
-  const tables = extractTables(normalizedQuery);
-  const joinClauses = extractJoinClauses(normalizedQuery);
-  const selectedExpressions = extractSelectExpressions(normalizedQuery);
+  const structuredTables = structure.root.sources.map((source) => source.name);
+  const tables =
+    structuredTables.length > 0 ? structuredTables : extractTables(normalizedQuery);
+  const structuredJoins = structure.root.sources
+    .filter((source) => source.joinType !== null)
+    .map((source) => ({ type: source.joinType ?? "inner", table: source.name }));
+  const joinClauses =
+    structuredJoins.length > 0 ? structuredJoins : extractJoinClauses(normalizedQuery);
+  const selectedExpressions =
+    structure.root.selectExpressions.length > 0
+      ? structure.root.selectExpressions
+      : extractSelectExpressions(normalizedQuery);
   const { aggregation, aggregationDistinctTarget } = extractAggregation(selectedExpressions);
-  const whereClause = extractWhereClause(normalizedQuery);
-  const whereOperators = extractWhereOperators(whereClause);
-  const groupByExpressions = extractGroupByExpressions(normalizedQuery);
-  const conditions = splitConditions(whereClause);
+  const whereClause = structure.root.canonicalWhereClause;
+  const whereOperators =
+    structure.root.booleanExpression?.operators ?? extractWhereOperators(whereClause);
+  const groupByExpressions =
+    structure.root.canonicalGroupByExpressions.length > 0
+      ? [...structure.root.canonicalGroupByExpressions].sort()
+      : extractGroupByExpressions(structure.root.sql).sort();
+  const conditions =
+    structure.root.booleanExpression?.predicates ??
+    splitConditions(whereClause).map((condition) =>
+      canonicalizeSqlExpression(condition, structure.root.aliases),
+    );
   const timeWindows = extractTimeWindows(conditions);
   const filters = extractFilters(conditions);
-  const metricName = inferMetricName(normalizedQuery, tables, conditions);
+  const metricName = inferMetricName(structure.root.sql, tables, conditions);
 
-  return {
+  const parsedQuery: ParsedSqlQuery = {
     rawQuery,
     normalizedQuery,
     tables,
@@ -238,4 +269,6 @@ export function tokenizeSql(rawQuery: string): ParsedSqlQuery {
     timeWindows,
     conditions,
   };
+  cacheSqlStructure(parsedQuery, structure);
+  return parsedQuery;
 }

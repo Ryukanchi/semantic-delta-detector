@@ -1,5 +1,27 @@
-import { tokenizeSql } from "../parser/sqlTokenizer.js";
-import { buildParserLimitationNotes } from "../parser/unsupportedConstructs.js";
+import {
+  hasAnalyzableSqlContent,
+  tokenizeSql,
+} from "../parser/sqlTokenizer.js";
+import {
+  getDirectBaseTables,
+  getReachableNestedScopes,
+  getSetOperationBranches,
+  getSetOperationOperators,
+  getSqlStructure,
+  getWindowFrameSignature,
+  getWindowOrderSignature,
+  getWindowPartitionSignature,
+  getWindowSummarySignature,
+  type ReachableNestedScope,
+  type SqlAggregationSummary,
+  type SqlQueryScopeSummary,
+  type SqlStructureSummary,
+  type SqlWindowSummary,
+} from "../parser/sqlStructure.js";
+import {
+  analyzeParserLimitations,
+  type ParserConfidenceCap,
+} from "../parser/unsupportedConstructs.js";
 import {
   buildSemanticProfile,
   estimateBaseSimilarity,
@@ -7,6 +29,14 @@ import {
   inferRiskLevel,
   normalizeText,
 } from "./semanticHeuristics.js";
+import {
+  buildSourceRoleComparison,
+  describeSourceUsages,
+  getCanonicalSourceRoleWindowSignatures,
+  getSourceUsageSignatures,
+  normalizePositionalSourceIdentity,
+  type SourceRoleComparison,
+} from "./sourceRoleCanonicalization.js";
 import {
   ConfidenceLevel,
   DetectedDifference,
@@ -36,6 +66,15 @@ function normalizeMetricInput(input: MetricDefinitionInput): MetricDefinitionInp
     description: input.description?.trim() || undefined,
     intended_use: input.intended_use?.trim() || undefined,
   };
+}
+
+function requireAnalyzableSqlInput(
+  input: MetricDefinitionInput,
+  queryLabel: "A" | "B",
+): void {
+  if (!hasAnalyzableSqlContent(input.query)) {
+    throw new Error(`Query ${queryLabel} SQL input must contain analyzable content.`);
+  }
 }
 
 function getDisplayMetricName(
@@ -98,20 +137,622 @@ function compareSourceDomain(
   };
 }
 
+function describeBranchPosition(index: number): string {
+  const labels = ["first", "second", "third", "fourth", "fifth"];
+  return labels[index] ?? `branch #${index + 1}`;
+}
+
+function compareSetOperations(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference[] {
+  const expressionA = getSqlStructure(queryA).syntax?.setExpression ?? null;
+  const expressionB = getSqlStructure(queryB).syntax?.setExpression ?? null;
+  if (!expressionA && !expressionB) {
+    return [];
+  }
+
+  if (!expressionA || !expressionB) {
+    return [
+      {
+        category: "business_logic_mismatch",
+        description:
+          "One query uses a set operation while the other does not. UNION, INTERSECT, and EXCEPT change how branch result sets are combined.",
+        impact: "high",
+      },
+    ];
+  }
+
+  const differences: DetectedDifference[] = [];
+  const operatorsA = getSetOperationOperators(expressionA);
+  const operatorsB = getSetOperationOperators(expressionB);
+  if (operatorsA.join("|") !== operatorsB.join("|")) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The set-operation sequence changes from ${operatorsA.join(", ").toUpperCase()} to ${operatorsB.join(", ").toUpperCase()}. In particular, UNION and UNION ALL differ in duplicate handling, while INTERSECT and EXCEPT select different populations.`,
+      impact: "high",
+    });
+  }
+
+  const branchesA = getSetOperationBranches(expressionA);
+  const branchesB = getSetOperationBranches(expressionB);
+  if (branchesA.length !== branchesB.length) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The set operation changes from ${branchesA.length} branches in Query A to ${branchesB.length} branches in Query B. Adding or removing a branch changes the combined population.`,
+      impact: "high",
+    });
+    return differences;
+  }
+
+  const sourceSignaturesA = branchesA.map((branch) =>
+    sortedUnique(branch.sources.map((source) => source.name)).join("|"),
+  );
+  const sourceSignaturesB = branchesB.map((branch) =>
+    sortedUnique(branch.sources.map((source) => source.name)).join("|"),
+  );
+  if (
+    [...sourceSignaturesA].sort().join("||") ===
+    [...sourceSignaturesB].sort().join("||")
+  ) {
+    return differences;
+  }
+
+  for (let index = 0; index < branchesA.length; index += 1) {
+    if (sourceSignaturesA[index] === sourceSignaturesB[index]) {
+      continue;
+    }
+
+    const sourcesA = sortedUnique(branchesA[index].sources.map((source) => source.name));
+    const sourcesB = sortedUnique(branchesB[index].sources.map((source) => source.name));
+    differences.push({
+      category: "source_domain_mismatch",
+      description: `The ${describeBranchPosition(index)} set-operation branch changes its source from ${sourcesA.join(", ") || "no physical table"} to ${sourcesB.join(", ") || "no physical table"}. This changes the population contributed by that branch.`,
+      impact: "high",
+    });
+  }
+
+  return differences;
+}
+
+function formatWindowFunctionName(functionName: string): string {
+  return functionName.toUpperCase();
+}
+
+function formatWindowPartition(window: SqlWindowSummary): string {
+  return [...new Set(window.partitionBy)].sort().join(", ") || "no partition";
+}
+
+function formatWindowOrder(window: SqlWindowSummary): string {
+  return (
+    window.orderBy
+      .map((item) => {
+        const direction = item.direction ?? "asc";
+        const nulls = item.nulls ?? (direction === "asc" ? "last" : "first");
+        return `${item.expression} ${direction.toUpperCase()} NULLS ${nulls.toUpperCase()}`;
+      })
+      .join(", ") || "no ordering"
+  );
+}
+
+function formatWindowFrame(window: SqlWindowSummary): string {
+  if (!window.frame) {
+    return "the default frame";
+  }
+
+  const unit = window.frame.unit.toUpperCase();
+  const start = window.frame.start.toUpperCase();
+  return window.frame.end
+    ? `${unit} BETWEEN ${start} AND ${window.frame.end.toUpperCase()}`
+    : `${unit} ${start}`;
+}
+
+function getWindowPairingCost(
+  windowA: SqlWindowSummary,
+  windowB: SqlWindowSummary,
+): number {
+  let cost = windowA.functionName === windowB.functionName ? 0 : 8;
+  if (
+    getWindowPartitionSignature(windowA) !==
+    getWindowPartitionSignature(windowB)
+  ) {
+    cost += 1;
+  }
+  if (getWindowOrderSignature(windowA) !== getWindowOrderSignature(windowB)) {
+    cost += 1;
+  }
+  if (getWindowFrameSignature(windowA) !== getWindowFrameSignature(windowB)) {
+    cost += 1;
+  }
+  return cost;
+}
+
+interface WindowPair {
+  windowA: SqlWindowSummary;
+  windowB: SqlWindowSummary;
+}
+
+function pairChangedWindows(
+  windowsA: SqlWindowSummary[],
+  windowsB: SqlWindowSummary[],
+): WindowPair[] {
+  const unmatchedA = [...windowsA].sort((first, second) =>
+    getWindowSummarySignature(first).localeCompare(
+      getWindowSummarySignature(second),
+    ),
+  );
+  const unmatchedB = [...windowsB].sort((first, second) =>
+    getWindowSummarySignature(first).localeCompare(
+      getWindowSummarySignature(second),
+    ),
+  );
+
+  for (let index = unmatchedA.length - 1; index >= 0; index -= 1) {
+    const signature = getWindowSummarySignature(unmatchedA[index]);
+    const exactIndex = unmatchedB.findIndex(
+      (window) => getWindowSummarySignature(window) === signature,
+    );
+    if (exactIndex >= 0) {
+      unmatchedA.splice(index, 1);
+      unmatchedB.splice(exactIndex, 1);
+    }
+  }
+
+  const pairs: WindowPair[] = [];
+  while (unmatchedA.length > 0 && unmatchedB.length > 0) {
+    const windowA = unmatchedA.shift() as SqlWindowSummary;
+    let bestIndex = 0;
+    let bestCost = getWindowPairingCost(windowA, unmatchedB[0]);
+    for (let index = 1; index < unmatchedB.length; index += 1) {
+      const candidateCost = getWindowPairingCost(windowA, unmatchedB[index]);
+      if (candidateCost < bestCost) {
+        bestCost = candidateCost;
+        bestIndex = index;
+      }
+    }
+    const [windowB] = unmatchedB.splice(bestIndex, 1);
+    pairs.push({ windowA, windowB });
+  }
+  return pairs;
+}
+
+function compareWindowSpecifications(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
+): DetectedDifference[] {
+  const syntaxA = getSqlStructure(queryA).syntax;
+  const syntaxB = getSqlStructure(queryB).syntax;
+  const windowsA = syntaxA?.windows ?? [];
+  const windowsB = syntaxB?.windows ?? [];
+  const signaturesA = windowsA.map(getWindowSummarySignature).sort();
+  const signaturesB = windowsB.map(getWindowSummarySignature).sort();
+  if (signaturesA.join("|") === signaturesB.join("|")) {
+    return [];
+  }
+  if (sourceRoles?.safe) {
+    const roleSignaturesA = getCanonicalSourceRoleWindowSignatures(
+      syntaxA,
+      sourceRoles.analysisA,
+    );
+    const roleSignaturesB = getCanonicalSourceRoleWindowSignatures(
+      syntaxB,
+      sourceRoles.analysisB,
+    );
+    if (
+      roleSignaturesA &&
+      roleSignaturesB &&
+      arraysEqual(roleSignaturesA, roleSignaturesB)
+    ) {
+      return [];
+    }
+  }
+
+  const differences: DetectedDifference[] = [];
+  if (windowsA.length !== windowsB.length) {
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The window expression count changed from ${windowsA.length} to ${windowsB.length}. Adding or removing a window calculation changes which ranked, offset, or rolling values the query produces.`,
+      impact: "high",
+    });
+  }
+
+  for (const { windowA, windowB } of pairChangedWindows(windowsA, windowsB)) {
+    const functionA = formatWindowFunctionName(windowA.functionName);
+    const functionB = formatWindowFunctionName(windowB.functionName);
+    const functionLabel =
+      windowA.functionName === windowB.functionName
+        ? `${functionA} window`
+        : `${functionA}/${functionB} window`;
+
+    if (windowA.functionName !== windowB.functionName) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The window function changes from ${functionA} to ${functionB}. Different window functions can produce different rankings, offsets, or aggregates even when their window specification is unchanged.`,
+        impact: "high",
+      });
+    }
+
+    if (
+      getWindowPartitionSignature(windowA) !==
+      getWindowPartitionSignature(windowB)
+    ) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its PARTITION BY definition from ${formatWindowPartition(windowA)} to ${formatWindowPartition(windowB)}. This changes which rows are ranked or aggregated together inside each window partition.`,
+        impact: "high",
+      });
+    }
+
+    if (getWindowOrderSignature(windowA) !== getWindowOrderSignature(windowB)) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its ORDER BY definition from ${formatWindowOrder(windowA)} to ${formatWindowOrder(windowB)}. This changes the ordering used for ranking, offsets, or cumulative window calculations.`,
+        impact: "high",
+      });
+    }
+
+    if (getWindowFrameSignature(windowA) !== getWindowFrameSignature(windowB)) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The ${functionLabel} changes its frame from ${formatWindowFrame(windowA)} to ${formatWindowFrame(windowB)}. This changes which rows contribute to the window result for each current row.`,
+        impact: "high",
+      });
+    }
+  }
+
+  return differences;
+}
+
 function compareAggregation(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
+  const aggregationsA = getSqlStructure(queryA).root.aggregations;
+  const aggregationsB = getSqlStructure(queryB).root.aggregations;
+  const canonicalA = aggregationsA.map((item) => item.canonical).sort();
+  const canonicalB = aggregationsB.map((item) => item.canonical).sort();
+
   if (
-    queryA.aggregation === queryB.aggregation &&
-    queryA.aggregationDistinctTarget === queryB.aggregationDistinctTarget
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature
   ) {
+    const roleUsagesA = getSourceUsageSignatures(
+      sourceRoles.analysisA,
+      ["aggregation"],
+    );
+    const roleUsagesB = getSourceUsageSignatures(
+      sourceRoles.analysisB,
+      ["aggregation"],
+    );
+    const neutralCanonicalA = canonicalA.map(normalizePositionalSourceIdentity);
+    const neutralCanonicalB = canonicalB.map(normalizePositionalSourceIdentity);
+    const neutralAggregationsMatch = arraysEqual(
+      neutralCanonicalA,
+      neutralCanonicalB,
+    );
+
+    if (neutralAggregationsMatch && arraysEqual(roleUsagesA, roleUsagesB)) {
+      return null;
+    }
+    if (neutralAggregationsMatch) {
+      return {
+        category: "aggregation_mismatch",
+        description: `The aggregation changes its qualified source role from ${describeSourceUsages(sourceRoles.analysisA.usages, ["aggregation"])} to ${describeSourceUsages(sourceRoles.analysisB.usages, ["aggregation"])}. Although both occurrences come from the same physical table, their join fields show that they measure different semantic roles.`,
+        impact: "high",
+      };
+    }
+  }
+
+  if (arraysEqual(canonicalA, canonicalB)) {
     return null;
   }
 
   return {
     category: "aggregation_mismatch",
-    description: buildAggregationDifferenceDescription(queryA, queryB),
+    description: buildAggregationDifferenceDescription(
+      queryA,
+      queryB,
+      aggregationsA,
+      aggregationsB,
+    ),
+    impact: "high",
+  };
+}
+
+function arraysEqual(valuesA: string[], valuesB: string[]): boolean {
+  return valuesA.join("|") === valuesB.join("|");
+}
+
+function compareSourceRoleUsages(
+  sourceRoles: SourceRoleComparison,
+): DetectedDifference[] {
+  if (
+    !sourceRoles.safe ||
+    sourceRoles.analysisA.graphSignature !== sourceRoles.analysisB.graphSignature
+  ) {
+    return [];
+  }
+
+  const contexts = [
+    ["projection", "projection"],
+    ["filter", "filter"],
+    ["grouping", "grouping"],
+    ["having", "HAVING"],
+    ["ordering", "ordering"],
+  ] as const;
+  const differences: DetectedDifference[] = [];
+  for (const [context, label] of contexts) {
+    const signaturesA = getSourceUsageSignatures(sourceRoles.analysisA, [context]);
+    const signaturesB = getSourceUsageSignatures(sourceRoles.analysisB, [context]);
+    if (arraysEqual(signaturesA, signaturesB)) {
+      continue;
+    }
+    differences.push({
+      category: "business_logic_mismatch",
+      description: `The qualified ${label} source role changes from ${describeSourceUsages(sourceRoles.analysisA.usages, [context])} to ${describeSourceUsages(sourceRoles.analysisB.usages, [context])}. The physical table is unchanged, but the referenced occurrence has a different role in the self-join graph.`,
+      impact: "high",
+    });
+  }
+  return differences;
+}
+
+function sortedUnique(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function formatScopeAggregations(scope: ReachableNestedScope["scope"]): string {
+  return scope.aggregations.map((aggregation) => aggregation.display).join(", ") || "none";
+}
+
+function comparableNestedLabel(scope: ReachableNestedScope): string {
+  return scope.label.replace(/\s+#\d+$/, "");
+}
+
+function compareCaseCollections(
+  scopeA: SqlQueryScopeSummary,
+  scopeB: SqlQueryScopeSummary,
+  contextLabel = "",
+  sourceRoles?: SourceRoleComparison,
+): DetectedDifference | null {
+  const canonicalA = scopeA.cases.map((item) => item.canonical).sort();
+  const canonicalB = scopeB.cases.map((item) => item.canonical).sort();
+  if (canonicalA.join("|") === canonicalB.join("|")) {
+    return null;
+  }
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    arraysEqual(
+      canonicalA.map(normalizePositionalSourceIdentity),
+      canonicalB.map(normalizePositionalSourceIdentity),
+    ) &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+      getSourceUsageSignatures(sourceRoles.analysisB, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+    )
+  ) {
+    return null;
+  }
+
+  if (scopeA.cases.length !== scopeB.cases.length) {
+    return {
+      category: "business_logic_mismatch",
+      description: `${contextLabel ? `${contextLabel} ` : ""}CASE expression count changed from ${scopeA.cases.length} to ${scopeB.cases.length}. CASE expressions can change which values contribute to the metric.`,
+      impact: "high",
+    };
+  }
+
+  for (let index = 0; index < scopeA.cases.length; index += 1) {
+    const caseA = scopeA.cases[index];
+    const caseB = scopeB.cases[index];
+    const label = `${contextLabel ? `${contextLabel} ` : ""}CASE expression #${index + 1}`;
+    if (caseA.conditions.join("|") !== caseB.conditions.join("|")) {
+      return {
+        category: "business_logic_mismatch",
+        description: `${label} changes its condition from ${caseA.conditions.join("; ") || "none"} to ${caseB.conditions.join("; ") || "none"}. This changes which rows or values qualify inside the metric definition.`,
+        impact: "high",
+      };
+    }
+    if (caseA.results.join("|") !== caseB.results.join("|")) {
+      return {
+        category: "business_logic_mismatch",
+        description: `${label} changes its result from ${caseA.results.join("; ") || "none"} to ${caseB.results.join("; ") || "none"}. This changes the value produced by the metric definition.`,
+        impact: "high",
+      };
+    }
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `${contextLabel ? `${contextLabel} ` : ""}CASE expression structure changed and may alter the metric definition.`,
+    impact: "high",
+  };
+}
+
+function compareNestedQueryScopes(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+): DetectedDifference[] {
+  const scopesA = getReachableNestedScopes(getSqlStructure(queryA).root);
+  const scopesB = getReachableNestedScopes(getSqlStructure(queryB).root);
+  const differences: DetectedDifference[] = [];
+  const scopeCount = Math.max(scopesA.length, scopesB.length);
+
+  for (let index = 0; index < scopeCount; index += 1) {
+    const nestedA = scopesA[index];
+    const nestedB = scopesB[index];
+    if (!nestedA || !nestedB) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `The reachable nested-query structure changed. Query A has ${scopesA.length} reachable CTE/subquery scopes, while Query B has ${scopesB.length}.`,
+        impact: "high",
+      });
+      break;
+    }
+
+    const labelA = comparableNestedLabel(nestedA);
+    const labelB = comparableNestedLabel(nestedB);
+    const scopeLabel = labelA === labelB ? labelA : `${labelA} / ${labelB}`;
+
+    if (nestedA.correlated !== nestedB.correlated) {
+      differences.push({
+        category: "filter_logic_mismatch",
+        description: `${scopeLabel} changed from ${nestedA.correlated ? "correlated" : "uncorrelated"} to ${nestedB.correlated ? "correlated" : "uncorrelated"}. This changes whether the inner predicate depends on each outer record and can materially change which outer records qualify.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const inverseExistence =
+      (nestedA.operator === "exists" && nestedB.operator === "not exists") ||
+      (nestedA.operator === "not exists" && nestedB.operator === "exists");
+    const inverseMembership =
+      (nestedA.operator === "in" && nestedB.operator === "not in") ||
+      (nestedA.operator === "not in" && nestedB.operator === "in");
+    if (inverseExistence || inverseMembership) {
+      differences.push({
+        category: "filter_logic_mismatch",
+        description: `${scopeLabel} changed from ${nestedA.operator?.toUpperCase()} to ${nestedB.operator?.toUpperCase()}. This negation inverts which outer records qualify for the metric.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const tablesA = sortedUnique(getDirectBaseTables(nestedA.scope));
+    const tablesB = sortedUnique(getDirectBaseTables(nestedB.scope));
+    if (tablesA.join("|") !== tablesB.join("|")) {
+      const outerTablesA = sortedUnique(getDirectBaseTables(getSqlStructure(queryA).root));
+      const outerTablesB = sortedUnique(getDirectBaseTables(getSqlStructure(queryB).root));
+      const outerNote =
+        outerTablesA.length > 0 && outerTablesA.join("|") === outerTablesB.join("|")
+          ? ` The outer source ${outerTablesA.join(", ")} remains unchanged.`
+          : "";
+      differences.push({
+        category: "source_domain_mismatch",
+        description: `${scopeLabel} changes its source from ${tablesA.join(", ") || "no direct table"} to ${tablesB.join(", ") || "no direct table"}.${outerNote}`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const caseDifference = compareCaseCollections(
+      nestedA.scope,
+      nestedB.scope,
+      scopeLabel,
+    );
+    if (caseDifference) {
+      differences.push(caseDifference);
+      continue;
+    }
+
+    const aggregationsA = nestedA.scope.aggregations
+      .map((aggregation) => aggregation.canonical)
+      .sort();
+    const aggregationsB = nestedB.scope.aggregations
+      .map((aggregation) => aggregation.canonical)
+      .sort();
+    if (aggregationsA.join("|") !== aggregationsB.join("|")) {
+      differences.push({
+        category: "aggregation_mismatch",
+        description: `${scopeLabel} changes its aggregation set from ${formatScopeAggregations(nestedA.scope)} to ${formatScopeAggregations(nestedB.scope)}.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const selectionsA = [...nestedA.scope.canonicalSelectExpressions].sort();
+    const selectionsB = [...nestedB.scope.canonicalSelectExpressions].sort();
+    if (selectionsA.join("|") !== selectionsB.join("|")) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its selected expressions from ${selectionsA.join(", ") || "none"} to ${selectionsB.join(", ") || "none"}. This changes the values produced by that scope.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    const groupsA = [...nestedA.scope.canonicalGroupByExpressions].sort();
+    const groupsB = [...nestedB.scope.canonicalGroupByExpressions].sort();
+    if (groupsA.join("|") !== groupsB.join("|")) {
+      differences.push({
+        category: "reporting_grain_mismatch",
+        description: `${scopeLabel} changes its grouping from ${groupsA.join(", ") || "ungrouped"} to ${groupsB.join(", ") || "ungrouped"}. This changes the grain produced by that scope without attributing it to the outer query.`,
+        impact: "medium",
+      });
+      continue;
+    }
+
+    const joinPredicatesA = [...nestedA.scope.joinPredicates].sort();
+    const joinPredicatesB = [...nestedB.scope.joinPredicates].sort();
+    if (joinPredicatesA.join("|") !== joinPredicatesB.join("|")) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its join predicate from ${joinPredicatesA.join(", ") || "none"} to ${joinPredicatesB.join(", ") || "none"}. Different join keys can change matches, row multiplication, and the population produced by that scope.`,
+        impact: "high",
+      });
+      continue;
+    }
+
+    if (nestedA.scope.canonicalWhereClause !== nestedB.scope.canonicalWhereClause) {
+      differences.push({
+        category: "business_logic_mismatch",
+        description: `${scopeLabel} changes its filter from ${nestedA.scope.canonicalWhereClause || "no filter"} to ${nestedB.scope.canonicalWhereClause || "no filter"}. This changes the population produced by that scope without attributing the change to the outer query.`,
+        impact: /correlated/i.test(scopeLabel) ? "high" : "medium",
+      });
+    }
+  }
+
+  return differences;
+}
+
+function compareJoinPredicates(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
+): DetectedDifference | null {
+  if (
+    queryA.joinClauses.length === 0 ||
+    queryA.joinClauses.length !== queryB.joinClauses.length
+  ) {
+    return null;
+  }
+  if (sourceRoles?.safe) {
+    if (
+      sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature
+    ) {
+      return null;
+    }
+    return {
+      category: "business_logic_mismatch",
+      description: `The source-role join graph changes from ${sourceRoles.analysisA.graphDescription} to ${sourceRoles.analysisB.graphDescription}. Different role edges or join-key fields can change matches, row multiplication, and the measured population even when every occurrence comes from the same physical table.`,
+      impact: "high",
+    };
+  }
+  const predicatesA = [...getSqlStructure(queryA).root.joinPredicates].sort();
+  const predicatesB = [...getSqlStructure(queryB).root.joinPredicates].sort();
+  if (predicatesA.join("|") === predicatesB.join("|")) {
+    return null;
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `The join predicate changes from ${predicatesA.join(", ") || "none"} to ${predicatesB.join(", ") || "none"}. Different join keys can change matches, row multiplication, and the measured population.`,
     impact: "high",
   };
 }
@@ -250,6 +891,7 @@ function inferReportingGrain(query: ParsedSqlQuery): string | null {
 function compareReportingGrain(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
   const grainA = inferReportingGrain(queryA);
   const grainB = inferReportingGrain(queryB);
@@ -259,6 +901,19 @@ function compareReportingGrain(
   }
 
   if (grainA === grainB) {
+    return null;
+  }
+
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    normalizePositionalSourceIdentity(grainA ?? "") ===
+      normalizePositionalSourceIdentity(grainB ?? "") &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["grouping"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["grouping"]),
+    )
+  ) {
     return null;
   }
 
@@ -535,8 +1190,15 @@ function describeDistinctUserRowCountChange(
 function buildAggregationDifferenceDescription(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
+  aggregationsA: SqlAggregationSummary[],
+  aggregationsB: SqlAggregationSummary[],
 ): string {
-  const baseDescription = `Aggregation changed from ${formatAggregation(queryA)} to ${formatAggregation(queryB)}. Query A uses ${queryA.aggregation || "no aggregation"} over ${queryA.aggregationDistinctTarget || "*"}, while Query B uses ${queryB.aggregation || "no aggregation"} over ${queryB.aggregationDistinctTarget || "*"}.`;
+  const displayA = aggregationsA.map((item) => item.display);
+  const displayB = aggregationsB.map((item) => item.display);
+  const baseDescription =
+    aggregationsA.length <= 1 && aggregationsB.length <= 1
+      ? `Aggregation changed from ${displayA[0] ?? formatAggregation(queryA)} to ${displayB[0] ?? formatAggregation(queryB)}. Query A uses ${aggregationsA[0]?.functionName ?? queryA.aggregation ?? "no aggregation"} over ${aggregationsA[0]?.argument ?? queryA.aggregationDistinctTarget ?? "*"}, while Query B uses ${aggregationsB[0]?.functionName ?? queryB.aggregation ?? "no aggregation"} over ${aggregationsB[0]?.argument ?? queryB.aggregationDistinctTarget ?? "*"}.`
+      : `Aggregation set changed. Query A computes ${displayA.join(", ") || "no aggregation"}, while Query B computes ${displayB.join(", ") || "no aggregation"}. All aggregate expressions are compared regardless of SELECT order.`;
 
   if (isDistinctUserVsRowCountChange(queryA, queryB)) {
     return `${baseDescription} ${describeDistinctUserRowCountChange(queryA, queryB)} This changes the metric from unique users to event rows; repeated events by the same user can make COUNT(*) larger than COUNT(DISTINCT user_id).`;
@@ -707,6 +1369,37 @@ function compareFilterBooleanLogic(
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
 ): DetectedDifference | null {
+  const booleanA = getSqlStructure(queryA).root.booleanExpression;
+  const booleanB = getSqlStructure(queryB).root.booleanExpression;
+  if (booleanA && booleanB) {
+    if (booleanA.canonical === booleanB.canonical) {
+      return null;
+    }
+
+    if (booleanA.predicates.join("|") !== booleanB.predicates.join("|")) {
+      return null;
+    }
+
+    if (booleanA.hasNegation !== booleanB.hasNegation) {
+      return {
+        category: "filter_logic_mismatch",
+        description: "The WHERE boolean negation structure changed while the underlying predicates stayed the same. Adding or removing NOT can invert which records qualify for the metric.",
+        impact: "high",
+      };
+    }
+
+    const simpleAndOrTransition =
+      (usesOnly(queryA.whereOperators, "and") && usesOnly(queryB.whereOperators, "or")) ||
+      (usesOnly(queryA.whereOperators, "or") && usesOnly(queryB.whereOperators, "and"));
+    if (!simpleAndOrTransition) {
+      return {
+        category: "filter_logic_mismatch",
+        description: `The WHERE boolean operator structure changed through different AND/OR grouping while the predicates stayed the same (${formatFilterList(booleanA.predicates)}). Different parenthesis and precedence structure can change the measured population.`,
+        impact: "high",
+      };
+    }
+  }
+
   // Only judge boolean structure when the individual conditions are identical;
   // added or removed conditions are covered by the filter-scope detectors.
   if (!queryA.whereClause || !queryB.whereClause || !hasSameConditionSet(queryA, queryB)) {
@@ -747,7 +1440,22 @@ function compareBusinessLogic(
   queryB: ParsedSqlQuery,
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
+  sourceRoles?: SourceRoleComparison,
 ): DetectedDifference | null {
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    arraysEqual(
+      [...queryA.filters].map(normalizePositionalSourceIdentity).sort(),
+      [...queryB.filters].map(normalizePositionalSourceIdentity).sort(),
+    ) &&
+    arraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["filter"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["filter"]),
+    )
+  ) {
+    return null;
+  }
   const ignorePatterns = [
     /paid|subscription|plan|mrr|arr/i,
     /last_active|event_date|created_at|current_date|current_timestamp|interval/i,
@@ -873,6 +1581,10 @@ function compareMetricIntent(
   differences: DetectedDifference[],
 ): DetectedDifference | null {
   if (profileA.businessMeaning === profileB.businessMeaning) {
+    return null;
+  }
+
+  if (profileA.primaryDimension === profileB.primaryDimension) {
     return null;
   }
 
@@ -1005,6 +1717,36 @@ function inferConfidenceLevel(
   }
 
   return "medium";
+}
+
+function applyParserConfidenceCap(
+  confidenceLevel: ConfidenceLevel,
+  confidenceCap: ParserConfidenceCap | undefined,
+): ConfidenceLevel {
+  if (!confidenceCap || confidenceLevel === "low") {
+    return confidenceLevel;
+  }
+
+  if (confidenceCap === "low") {
+    return "low";
+  }
+
+  return confidenceLevel === "high" ? "medium" : confidenceLevel;
+}
+
+function getMostRestrictiveParserConfidenceCap(
+  first: ParserConfidenceCap | undefined,
+  second: ParserConfidenceCap | undefined,
+): ParserConfidenceCap | undefined {
+  if (first === "low" || second === "low") {
+    return "low";
+  }
+
+  if (first === "medium" || second === "medium") {
+    return "medium";
+  }
+
+  return undefined;
 }
 
 function ensureRiskCoversDetectedDifferences(
@@ -1520,14 +2262,28 @@ export function buildVerdict(
   return "LOW RISK: This change is unlikely to alter the meaning of the metric.";
 }
 
-export function compareMetricDefinitions(
+export interface SqlComparisonAnalysisOverrides {
+  structureA?: SqlStructureSummary;
+  structureB?: SqlStructureSummary;
+  parserLimitations?: string[];
+  confidenceCap?: ParserConfidenceCap;
+}
+
+export function compareMetricDefinitionsWithAnalysis(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
+  overrides: SqlComparisonAnalysisOverrides = {},
 ): SemanticComparisonResult {
   const normalizedInputA = normalizeMetricInput(inputA);
   const normalizedInputB = normalizeMetricInput(inputB);
-  const parsedA = tokenizeSql(normalizedInputA.query);
-  const parsedB = tokenizeSql(normalizedInputB.query);
+  requireAnalyzableSqlInput(normalizedInputA, "A");
+  requireAnalyzableSqlInput(normalizedInputB, "B");
+  const parsedA = tokenizeSql(normalizedInputA.query, overrides.structureA);
+  const parsedB = tokenizeSql(normalizedInputB.query, overrides.structureB);
+  const sourceRoles = buildSourceRoleComparison(
+    getSqlStructure(parsedA).syntax,
+    getSqlStructure(parsedB).syntax,
+  );
   const profileA = buildSemanticProfile(parsedA);
   const profileB = buildSemanticProfile(parsedB);
   const likelyBusinessMeaningA = buildBusinessMeaningSummary(parsedA, profileA);
@@ -1539,15 +2295,43 @@ export function compareMetricDefinitions(
     compareMetricNameAlignment(normalizedInputA, normalizedInputB, profileA, profileB),
   );
   pushDifference(detectedDifferences, compareSourceDomain(parsedA, parsedB, profileA, profileB));
-  pushDifference(detectedDifferences, compareAggregation(parsedA, parsedB));
+  detectedDifferences.push(...compareSetOperations(parsedA, parsedB));
+  detectedDifferences.push(
+    ...compareWindowSpecifications(parsedA, parsedB, sourceRoles),
+  );
+  pushDifference(
+    detectedDifferences,
+    compareAggregation(parsedA, parsedB, sourceRoles),
+  );
+  detectedDifferences.push(...compareSourceRoleUsages(sourceRoles));
+  pushDifference(
+    detectedDifferences,
+    compareCaseCollections(
+      getSqlStructure(parsedA).root,
+      getSqlStructure(parsedB).root,
+      "",
+      sourceRoles,
+    ),
+  );
+  detectedDifferences.push(...compareNestedQueryScopes(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinPopulation(parsedA, parsedB));
   pushDifference(detectedDifferences, compareJoinType(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareJoinPredicates(parsedA, parsedB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareTimeReference(profileA, profileB));
-  pushDifference(detectedDifferences, compareReportingGrain(parsedA, parsedB));
+  pushDifference(
+    detectedDifferences,
+    compareReportingGrain(parsedA, parsedB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
   pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
   pushDifference(detectedDifferences, compareFilterBooleanLogic(parsedA, parsedB));
-  pushDifference(detectedDifferences, compareBusinessLogic(parsedA, parsedB, profileA, profileB));
+  pushDifference(
+    detectedDifferences,
+    compareBusinessLogic(parsedA, parsedB, profileA, profileB, sourceRoles),
+  );
   pushDifference(detectedDifferences, compareDescriptions(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareTeamContext(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareIntendedUse(normalizedInputA, normalizedInputB));
@@ -1565,11 +2349,23 @@ export function compareMetricDefinitions(
     profileB,
     detectedDifferences,
   );
-  const confidenceLevel = inferConfidenceLevel(evidenceSources, detectedDifferences);
-  const parserLimitations = buildParserLimitationNotes(
+  const parserAnalysis = analyzeParserLimitations(
     normalizedInputA.query,
     normalizedInputB.query,
   );
+  const confidenceLevel = applyParserConfidenceCap(
+    inferConfidenceLevel(evidenceSources, detectedDifferences),
+    getMostRestrictiveParserConfidenceCap(
+      parserAnalysis.confidenceCap,
+      overrides.confidenceCap,
+    ),
+  );
+  const parserLimitations = [
+    ...new Set([
+      ...parserAnalysis.notes,
+      ...(overrides.parserLimitations ?? []),
+    ]),
+  ];
 
   const result: SemanticComparisonResult = {
     metric_name_a: getDisplayMetricName(normalizedInputA, parsedA),
@@ -1606,6 +2402,13 @@ export function compareMetricDefinitions(
     verdict: buildVerdict(result, impact),
     impact,
   };
+}
+
+export function compareMetricDefinitions(
+  inputA: MetricDefinitionInput,
+  inputB: MetricDefinitionInput,
+): SemanticComparisonResult {
+  return compareMetricDefinitionsWithAnalysis(inputA, inputB);
 }
 
 export function compareSqlQueries(queryA: string, queryB: string): SemanticComparisonResult {

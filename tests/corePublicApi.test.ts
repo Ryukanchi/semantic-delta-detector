@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import * as coreApi from "../src/core.js";
 import * as rootApi from "../src/index.js";
+import * as postgresqlApi from "../src/postgresql.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(testDirectory, "..");
@@ -99,20 +100,45 @@ test("core exposes only the browser-safe semantic runtime API", () => {
   assert.equal(result.risk_level, "low");
 });
 
+test("the PostgreSQL opt-in entrypoint preserves the semantic runtime API shape", () => {
+  assert.deepEqual(
+    Object.keys(postgresqlApi).sort(),
+    [...expectedRuntimeExports].sort(),
+  );
+  for (const exportName of expectedRuntimeExports) {
+    assert.equal(typeof postgresqlApi[exportName], "function");
+  }
+  assert.notEqual(postgresqlApi.compareSqlQueries, coreApi.compareSqlQueries);
+});
+
 test("package metadata exposes the core runtime and declarations", () => {
   const packageJson = JSON.parse(
     readFileSync(resolve(projectRoot, "package.json"), "utf8"),
   ) as {
     exports: Record<string, { types: string; import: string }>;
+    files?: string[];
   };
 
   assert.deepEqual(packageJson.exports["./core"], {
     types: "./dist/core.d.ts",
     import: "./dist/core.js",
   });
+  assert.deepEqual(packageJson.exports["./postgresql"], {
+    types: "./dist/postgresql.d.ts",
+    import: "./dist/postgresql.js",
+  });
+  assert.deepEqual(packageJson.files, [
+    "dist",
+    "docs/assets/*.png",
+    "docs/design/postgresql-hybrid.md",
+  ]);
   assert.equal(
     fileURLToPath(import.meta.resolve("semantic-delta-detector/core")),
     resolve(projectRoot, "dist/core.js"),
+  );
+  assert.equal(
+    fileURLToPath(import.meta.resolve("semantic-delta-detector/postgresql")),
+    resolve(projectRoot, "dist/postgresql.js"),
   );
 });
 
@@ -124,6 +150,8 @@ test("core dependency graph excludes Node built-ins and Git runtime modules", ()
 
   assert.deepEqual([...graph.externalSpecifiers], []);
   assert.ok(modulePaths.includes("analyzer/differenceEngine.ts"));
+  assert.equal(modulePaths.includes("parser/nodeSqlParserAdapter.ts"), false);
+  assert.equal(modulePaths.includes("internal/enhancedSqlComparisonRuntime.ts"), false);
 
   for (const modulePath of modulePaths) {
     assert.doesNotMatch(
@@ -131,4 +159,15 @@ test("core dependency graph excludes Node built-ins and Git runtime modules", ()
       /^(?:git(?:Comparison|DiffParser|Discovery|DiscoveryError)\.ts|internal\/git)/,
     );
   }
+});
+
+test("package exports block PostgreSQL adapter internals", async () => {
+  await assert.rejects(
+    import("semantic-delta-detector/parser/nodeSqlParserAdapter"),
+    /Package subpath .* is not defined by "exports"/,
+  );
+  await assert.rejects(
+    import("semantic-delta-detector/internal/enhancedSqlComparisonRuntime"),
+    /Package subpath .* is not defined by "exports"/,
+  );
 });

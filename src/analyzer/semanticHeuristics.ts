@@ -5,6 +5,23 @@ import {
   QuerySemanticProfile,
   RiskLevel,
 } from "../types.js";
+import {
+  getReachableNestedSignature,
+  getReachableSemanticSignals,
+  getSetOperationSignature,
+  getSqlStructure,
+  getWindowSpecificationSignature,
+} from "../parser/sqlStructure.js";
+import {
+  buildSourceRoleComparison,
+  getCanonicalSourceRoleWindowSignatures,
+  getSourceUsageSignatures,
+  normalizePositionalSourceIdentity,
+} from "./sourceRoleCanonicalization.js";
+
+function stringArraysEqual(valuesA: string[], valuesB: string[]): boolean {
+  return valuesA.join("|") === valuesB.join("|");
+}
 
 function containsAny(text: string, keywords: string[]): boolean {
   const lower = text.toLowerCase();
@@ -15,13 +32,69 @@ function containsPattern(text: string, pattern: RegExp): boolean {
   return pattern.test(text.toLowerCase());
 }
 
+function stripWindowSpecificationClauses(input: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < input.length) {
+    const match = /\bover\s*\(/i.exec(input.slice(cursor));
+    if (!match) {
+      result += input.slice(cursor);
+      break;
+    }
+
+    const clauseStart = cursor + match.index;
+    const openingIndex = clauseStart + match[0].lastIndexOf("(");
+    result += input.slice(cursor, clauseStart);
+    let depth = 0;
+    let quote: "'" | '"' | null = null;
+    let closingIndex = -1;
+    for (let index = openingIndex; index < input.length; index += 1) {
+      const current = input[index];
+      const next = input[index + 1];
+      if (quote) {
+        if (current === quote && next === quote) {
+          index += 1;
+        } else if (current === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (current === "'" || current === '"') {
+        quote = current;
+      } else if (current === "(") {
+        depth += 1;
+      } else if (current === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          closingIndex = index;
+          break;
+        }
+      }
+    }
+
+    if (closingIndex < 0) {
+      return input;
+    }
+    cursor = closingIndex + 1;
+  }
+
+  return result.replace(/\s+/g, " ").trim();
+}
+
 function findSignal(query: ParsedSqlQuery): string[] {
-  return [
-    ...query.tables,
+  const structure = getSqlStructure(query);
+  const signals = [
     ...query.filters,
     ...query.timeWindows,
-    ...query.selectedExpressions,
-  ].map((value) => value.toLowerCase());
+    ...getReachableSemanticSignals(structure.root),
+  ];
+  return signals.map((value) =>
+    (structure.syntax?.windows.length
+      ? stripWindowSpecificationClauses(value)
+      : value
+    ).toLowerCase(),
+  );
 }
 
 function getJoinedSignals(query: ParsedSqlQuery): string {
@@ -279,14 +352,116 @@ export function normalizeText(input: string | undefined): string | null {
 export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSqlQuery): number {
   const profileA = buildSemanticProfile(queryA);
   const profileB = buildSemanticProfile(queryB);
+  const structureA = getSqlStructure(queryA);
+  const structureB = getSqlStructure(queryB);
+  const sourceRoles = buildSourceRoleComparison(
+    structureA.syntax,
+    structureB.syntax,
+  );
+  const roleGraphsMatch =
+    sourceRoles.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature;
   let score = 100;
 
-  if (queryA.aggregation !== queryB.aggregation) {
+  const aggregationSetA = structureA.root.aggregations
+    .map((aggregation) => aggregation.canonical)
+    .sort();
+  const aggregationSetB = structureB.root.aggregations
+    .map((aggregation) => aggregation.canonical)
+    .sort();
+  const roleAwareAggregationsMatch =
+    roleGraphsMatch &&
+    stringArraysEqual(
+      aggregationSetA.map(normalizePositionalSourceIdentity),
+      aggregationSetB.map(normalizePositionalSourceIdentity),
+    ) &&
+    stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["aggregation"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["aggregation"]),
+    );
+  if (
+    !stringArraysEqual(aggregationSetA, aggregationSetB) &&
+    !roleAwareAggregationsMatch
+  ) {
     score -= 25;
   }
 
-  if (queryA.aggregationDistinctTarget !== queryB.aggregationDistinctTarget) {
-    score -= 10;
+  const nestedSignatureA = getReachableNestedSignature(structureA.root);
+  const nestedSignatureB = getReachableNestedSignature(structureB.root);
+  if (nestedSignatureA !== nestedSignatureB) {
+    score -= 15;
+  }
+
+  const setOperationSignatureA = getSetOperationSignature(
+    structureA.syntax?.setExpression,
+  );
+  const setOperationSignatureB = getSetOperationSignature(
+    structureB.syntax?.setExpression,
+  );
+  if (setOperationSignatureA !== setOperationSignatureB) {
+    score -= 20;
+  }
+
+  const windowSignatureA = getWindowSpecificationSignature(structureA.syntax);
+  const windowSignatureB = getWindowSpecificationSignature(structureB.syntax);
+  const roleWindowSignaturesA = getCanonicalSourceRoleWindowSignatures(
+    structureA.syntax,
+    sourceRoles.analysisA,
+  );
+  const roleWindowSignaturesB = getCanonicalSourceRoleWindowSignatures(
+    structureB.syntax,
+    sourceRoles.analysisB,
+  );
+  const roleAwareWindowsMatch =
+    roleWindowSignaturesA !== null &&
+    roleWindowSignaturesB !== null &&
+    stringArraysEqual(roleWindowSignaturesA, roleWindowSignaturesB);
+  if (windowSignatureA !== windowSignatureB && !roleAwareWindowsMatch) {
+    score -= 20;
+  }
+
+  const caseSetA = structureA.root.cases
+    .map((item) => item.canonical)
+    .sort();
+  const caseSetB = structureB.root.cases
+    .map((item) => item.canonical)
+    .sort();
+  const roleAwareCasesMatch =
+    roleGraphsMatch &&
+    stringArraysEqual(
+      caseSetA.map(normalizePositionalSourceIdentity),
+      caseSetB.map(normalizePositionalSourceIdentity),
+    ) &&
+    stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+      getSourceUsageSignatures(sourceRoles.analysisB, [
+        "projection",
+        "aggregation",
+        "filter",
+        "grouping",
+        "having",
+        "ordering",
+      ]),
+    );
+  if (!stringArraysEqual(caseSetA, caseSetB) && !roleAwareCasesMatch) {
+    score -= 20;
+  }
+
+  const joinPredicatesA = [...structureA.root.joinPredicates].sort().join("|");
+  const joinPredicatesB = [...structureB.root.joinPredicates].sort().join("|");
+  if (
+    (sourceRoles.safe
+      ? sourceRoles.analysisA.graphSignature !== sourceRoles.analysisB.graphSignature
+      : joinPredicatesA !== joinPredicatesB)
+  ) {
+    score -= 20;
   }
 
   const sameTable = queryA.tables.some((table) => queryB.tables.includes(table));
@@ -303,7 +478,19 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
     score -= 30;
   }
 
-  const sharedFilters = queryA.filters.filter((filter) => queryB.filters.includes(filter)).length;
+  const roleAwareFiltersMatch =
+    roleGraphsMatch &&
+    stringArraysEqual(
+      [...queryA.filters].map(normalizePositionalSourceIdentity).sort(),
+      [...queryB.filters].map(normalizePositionalSourceIdentity).sort(),
+    ) &&
+    stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["filter"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["filter"]),
+    );
+  const sharedFilters = roleAwareFiltersMatch
+    ? Math.max(queryA.filters.length, queryB.filters.length)
+    : queryA.filters.filter((filter) => queryB.filters.includes(filter)).length;
   const maxFilters = Math.max(queryA.filters.length, queryB.filters.length);
   if (maxFilters > 0) {
     score -= Math.round(((maxFilters - sharedFilters) / maxFilters) * 12);
@@ -315,8 +502,35 @@ export function estimateBaseSimilarity(queryA: ParsedSqlQuery, queryB: ParsedSql
     score -= 8;
   }
 
-  if (queryA.groupByExpressions.join("|") !== queryB.groupByExpressions.join("|")) {
+  const roleAwareGroupingMatches =
+    roleGraphsMatch &&
+    stringArraysEqual(
+      queryA.groupByExpressions
+        .map(normalizePositionalSourceIdentity)
+        .sort(),
+      queryB.groupByExpressions
+        .map(normalizePositionalSourceIdentity)
+        .sort(),
+    ) &&
+    stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["grouping"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["grouping"]),
+    );
+  if (
+    queryA.groupByExpressions.join("|") !== queryB.groupByExpressions.join("|") &&
+    !roleAwareGroupingMatches
+  ) {
     score -= 10;
+  }
+
+  if (
+    roleGraphsMatch &&
+    !stringArraysEqual(
+      getSourceUsageSignatures(sourceRoles.analysisA, ["projection"]),
+      getSourceUsageSignatures(sourceRoles.analysisB, ["projection"]),
+    )
+  ) {
+    score -= 20;
   }
 
   const joinTypesA = queryA.joinClauses.map((join) => `${join.table}:${join.type}`).join("|");
