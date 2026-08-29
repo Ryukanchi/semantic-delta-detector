@@ -17,6 +17,22 @@ function runCli(args: string[]) {
   );
 }
 
+test("CLI help uses the installed command and a real bundled example", () => {
+  const result = runCli(["--help"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /semantic-delta-detector --query-a "SELECT \.\.\." --query-b "SELECT \.\.\."/,
+  );
+  assert.match(
+    result.stdout,
+    /semantic-delta-detector --example unique-login-users-vs-login-event-rows/,
+  );
+  assert.doesNotMatch(result.stdout, /pnpm compare/);
+  assert.doesNotMatch(result.stdout, /--example login-vs-paid/);
+});
+
 test("CLI PR examples include validated semantic cases", () => {
   const output = execFileSync(
     "npm",

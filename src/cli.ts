@@ -43,11 +43,11 @@ function printHelp(): void {
   console.log(`semantic-delta-detector
 
 Usage:
-  pnpm compare --query-a "SELECT ..." --query-b "SELECT ..."
-  pnpm compare --file-a ./query-a.sql --file-b ./query-b.sql
-  pnpm compare --before ./examples/before.sql --after ./examples/after.sql --pr
-  pnpm compare --example login-vs-paid
-  pnpm compare --changed-from origin/main --changed-to HEAD --repo .
+  semantic-delta-detector --query-a "SELECT ..." --query-b "SELECT ..."
+  semantic-delta-detector --file-a ./query-a.sql --file-b ./query-b.sql
+  semantic-delta-detector --before ./before.sql --after ./after.sql --pr
+  semantic-delta-detector --example unique-login-users-vs-login-event-rows
+  semantic-delta-detector --changed-from origin/main --changed-to HEAD --repo .
 
 Options:
   --query-a     Inline SQL query A
