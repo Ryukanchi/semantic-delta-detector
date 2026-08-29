@@ -46,10 +46,22 @@ The complete vendor AST is validated before Semantic Delta traverses it. The
 specialized set-operation, window, join-graph, and source-usage collectors also
 enforce their own output budgets.
 
-The limits compose rather than override one another. With the current vendor
-AST shape, a linear `UNION ALL` chain reaches the global depth budget at 60
-branches, before the separate 64-branch collector budget. This conservative
-pre-existing interaction is unchanged by Worker isolation.
+The AST depth budget limits genuine structural nesting inside each query branch.
+It protects recursive expression collectors and bounds pathological nesting;
+the total AST-node budget independently limits overall size. In
+`node-sql-parser@5.4.0`, linear `UNION`, `UNION ALL`, `INTERSECT`, and `EXCEPT`
+chains are represented as linked `SELECT._next` statements. These links are a
+horizontal branch sequence, not nested SQL expressions, so the adapter traverses
+them iteratively without adding AST depth. The separate branch collector also
+runs iteratively: 64 branches are accepted, while branch 65 fails closed with an
+explicit set-operation branch-limit reason.
+
+The budgets still compose across distinct resource axes. For example, any one
+of 64 set-operation branches can independently exceed the depth limit, and a
+large collection of otherwise shallow branches can still exceed the global
+node, source-occurrence, or SQL-length budget. Set-operation handling exempts
+only the validated horizontal `_next` link; it does not relax the depth limit
+inside a branch or increase any configured limit.
 
 ## Synchronous parser limitation
 

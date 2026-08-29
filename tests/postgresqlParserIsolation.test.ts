@@ -223,7 +223,7 @@ test("oversized SQL is still rejected by the pre-parse resource limit", async ()
   assert.match(result.parser_limitations?.join(" ") ?? "", /SQL input.*resource limit/i);
 });
 
-test("existing AST traversal limits remain active inside the worker", async () => {
+test("set-operation branch overflow remains visible inside the worker", async () => {
   const sql = Array.from(
     { length: postgresqlParserResourceLimits.maxSetOperationBranches + 1 },
     (_, index) => `SELECT user_id FROM users_${index}`,
@@ -232,14 +232,15 @@ test("existing AST traversal limits remain active inside the worker", async () =
 
   assert.equal(result.risk_level, "low");
   assert.equal(result.confidence_level, "low");
-  assert.match(result.parser_limitations?.join(" ") ?? "", /resource limit/i);
+  assert.match(
+    result.parser_limitations?.join(" ") ?? "",
+    /set-operation branch count exceeds.*64/i,
+  );
 });
 
-test("the largest currently accepted linear UNION chain survives Worker transfer", async () => {
-  // The existing global AST-depth budget rejects a linear chain at 60 branches.
-  const acceptedLinearBranchCount = 59;
+test("the documented 64-branch UNION limit survives Worker transfer", async () => {
   const sql = Array.from(
-    { length: acceptedLinearBranchCount },
+    { length: postgresqlParserResourceLimits.maxSetOperationBranches },
     (_, index) => `SELECT user_id FROM users_${index}`,
   ).join(" UNION ALL ");
   const result = await compareSqlQueriesIsolated(sql, sql);
