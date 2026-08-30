@@ -130,6 +130,7 @@ test("package metadata exposes the core runtime and declarations", () => {
   const packageJson = JSON.parse(
     readFileSync(resolve(projectRoot, "package.json"), "utf8"),
   ) as {
+    version?: string;
     exports: Record<string, { types: string; import: string }>;
     files?: string[];
     repository?: { type: string; url: string };
@@ -137,6 +138,8 @@ test("package metadata exposes the core runtime and declarations", () => {
     bugs?: { url: string };
     scripts?: Record<string, string>;
   };
+
+  assert.equal(packageJson.version, "1.0.0");
 
   assert.deepEqual(packageJson.exports["./core"], {
     types: "./dist/core.d.ts",
@@ -147,6 +150,7 @@ test("package metadata exposes the core runtime and declarations", () => {
     import: "./dist/postgresql.js",
   });
   assert.deepEqual(packageJson.files, [
+    "CHANGELOG.md",
     "dist",
     "docs/assets/*.png",
     "docs/design/git-discovery.md",
