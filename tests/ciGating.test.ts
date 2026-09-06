@@ -127,7 +127,9 @@ test("CLI --fail-on high triggers exit code 1 on MRR token gate removal", () => 
     const mrrGate = spawnSync(
       "node",
       [
-        "./dist/cli.js",
+        "--import",
+        "tsx",
+        "src/cli.ts",
         "--before",
         beforePath,
         "--after",
@@ -151,7 +153,9 @@ test("CLI --fail-on high triggers exit code 1 on MRR token gate removal", () => 
     const carrierGate = spawnSync(
       "node",
       [
-        "./dist/cli.js",
+        "--import",
+        "tsx",
+        "src/cli.ts",
         "--before",
         beforePath,
         "--after",
