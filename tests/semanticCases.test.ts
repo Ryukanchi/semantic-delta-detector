@@ -602,3 +602,61 @@ test("partial metadata is called out accurately in the explanation", () => {
   assert.match(result.explanation, /Partial metadata was available\./);
   assert.match(result.explanation, /Available on only one side: team context, intended use\./);
 });
+
+test("root SELECT DISTINCT change is detected as high risk", () => {
+  const result = compareSqlQueries(
+    "SELECT DISTINCT user_id FROM events;",
+    "SELECT user_id FROM events;",
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        difference.impact === "high" &&
+        /SELECT DISTINCT to SELECT/i.test(difference.description),
+    ),
+  );
+});
+
+test("root SELECT expression change is detected as high risk", () => {
+  const result = compareSqlQueries(
+    "SELECT user_id AS u FROM events;",
+    "SELECT session_id AS u FROM events;",
+  );
+
+  assert.equal(result.risk_level, "high");
+  assert.ok(
+    result.detected_differences.some(
+      (difference) =>
+        difference.category === "business_logic_mismatch" &&
+        difference.impact === "high" &&
+        /selected expressions from user_id to session_id/i.test(difference.description),
+    ),
+  );
+});
+
+test("reordered root SELECT columns stay equivalent and low risk", () => {
+  const result = compareSqlQueries(
+    "SELECT user_id, org_id FROM events;",
+    "SELECT org_id, user_id FROM events;",
+  );
+
+  assert.equal(result.risk_level, "low");
+  assert.equal(result.detected_differences.length, 0);
+});
+
+test("zero-finding explanation is observational rather than equivalence-asserting", () => {
+  const result = compareSqlQueries(
+    "SELECT user_id FROM events WHERE active = true;",
+    "SELECT user_id FROM events WHERE active = true;",
+  );
+
+  assert.equal(result.detected_differences.length, 0);
+  assert.match(
+    result.explanation,
+    /No material semantic difference was detected within the analyzed dimensions\./,
+  );
+  assert.doesNotMatch(result.explanation, /support the same business interpretation/i);
+});

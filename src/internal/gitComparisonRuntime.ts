@@ -103,13 +103,23 @@ export function compareGitChangesWithRunner(
       continue;
     }
 
-    analyzed.push({
-      path: pair.afterPath,
-      displayPath: pair.displayPath,
-      beforePath: pair.beforePath,
-      afterPath: pair.afterPath,
-      result: compareSqlQueries(content.beforeContent, content.afterContent),
-    });
+    try {
+      analyzed.push({
+        path: pair.afterPath,
+        displayPath: pair.displayPath,
+        beforePath: pair.beforePath,
+        afterPath: pair.afterPath,
+        result: compareSqlQueries(content.beforeContent, content.afterContent),
+      });
+    } catch (error) {
+      skipped.push({
+        stage: "analysis",
+        path: pair.afterPath,
+        beforePath: pair.beforePath,
+        afterPath: pair.afterPath,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   const discoveredCount = discovery.files.length + discovery.parserSkipped.length;

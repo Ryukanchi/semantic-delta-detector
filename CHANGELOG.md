@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.1 - 2026-09-05
+
+Semantic Delta 1.0.1 is a targeted correctness patch addressing comparison precision,
+Git comparison fault tolerance, CI configuration handling, and reporting trustworthiness.
+
+### Fixes
+
+- **Filter Comparison & Monetization Evidence**: Removed query-level regex suppression
+  that hid valid filter differences, restored token-boundary matching for MRR and ARR
+  metrics (including delimited tokens such as `mrr_usd` and `monthly_mrr`) without false
+  positives on unrelated terms (`carrier`, `arrival`, `warranty`), and established
+  explicit predicate ownership to deduplicate monetization gates cleanly.
+- **Root Projection Comparison**: Added comparison for top-level `SELECT` projection
+  expressions and `SELECT DISTINCT` modifiers, surfacing root expression shifts as high-risk
+  semantic differences while normalizing column order and excluding window specifications
+  and grouping expressions evaluated in dedicated engines.
+- **Git Per-File Analysis Accounting**: Isolated query comparison failures per file so
+  that unanalyzable SQL files (such as empty or comment-only scripts) are tracked as skipped
+  under the `analysis` stage rather than aborting the entire Git comparison run.
+- **CI Configuration & Operational Exit Codes**: Restored public source-level type
+  compatibility for `SeverityThreshold` while rejecting unsupported `critical` thresholds in
+  `--fail-on` and `semantic-delta.yml` with descriptive validation. Established distinct
+  process exit codes: `0` for success (gate passed), `1` for semantic gate failures, and `2`
+  for operational, configuration, or syntax errors. Unknown top-level configuration keys are
+  now strictly rejected.
+- **Trustworthiness**: Updated zero-finding reports to use conservative, observational
+  wording ("No material semantic difference was detected within the analyzed dimensions")
+  rather than asserting unqualified formal equivalence.
+
 ## 1.0.0 - 2026-08-30
 
 Semantic Delta 1.0.0 is the first stable release of the local-first semantic

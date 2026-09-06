@@ -123,9 +123,12 @@ npx semantic-delta-detector \
   --fail-on high
 ```
 
-Supported thresholds are `low`, `medium`, `high`, and `critical`. The gate uses the highest severity among analyzed files. Skipped files do not trigger semantic failure, and a run with no comparable files exits calmly unless an operational error occurred.
+Supported thresholds are `low`, `medium`, and `high`. The gate uses the highest severity among analyzed files. Skipped files do not trigger semantic failure, and a run with no comparable files exits calmly unless an operational error occurred.
 
-Operational errors remain distinct from semantic gate failures.
+Operational errors remain distinct from semantic gate failures:
+- Exit `0`: Successful comparison run, gate not triggered
+- Exit `1`: Semantic severity gate triggered (risk at or above `--fail-on` threshold)
+- Exit `2`: Operational, configuration, or runtime error
 
 ## Repository configuration
 

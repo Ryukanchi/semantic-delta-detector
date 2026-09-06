@@ -218,7 +218,11 @@ test("Git CLI gates against the highest analyzed severity", () => {
 
     assert.equal(highGate.status, 1);
     assert.match(highGate.stdout, /^🔴 HIGH RISK/);
-    assert.equal(criticalGate.status, 0, criticalGate.stderr);
+    assert.equal(criticalGate.status, 2);
+    assert.match(
+      criticalGate.stderr,
+      /Invalid --fail-on value "critical"\. Supported values: low, medium, high\./,
+    );
   });
 });
 
@@ -254,7 +258,11 @@ test("Git CLI lets CLI fail-on override repository config", () => {
     ]);
 
     assert.equal(configuredGate.status, 1);
-    assert.equal(cliOverride.status, 0, cliOverride.stderr);
+    assert.equal(cliOverride.status, 2);
+    assert.match(
+      cliOverride.stderr,
+      /Invalid --fail-on value "critical"\. Supported values: low, medium, high\./,
+    );
   });
 });
 
@@ -310,12 +318,12 @@ test("Git CLI reports invalid refs as operational errors", () => {
       repositoryPath,
     ]);
 
-    assert.equal(invalidBase.status, 1);
+    assert.equal(invalidBase.status, 2);
     assert.equal(invalidBase.stdout, "");
     assert.match(invalidBase.stderr, /Error: Unknown base ref "missing-ref"/);
     assert.match(invalidBase.stderr, /Needed a single revision|unknown revision/i);
     assert.doesNotMatch(invalidBase.stderr, /GitDiscoveryError|at discoverGitChangedFiles/);
-    assert.equal(invalidHead.status, 1);
+    assert.equal(invalidHead.status, 2);
     assert.match(invalidHead.stderr, /Error: Unknown head ref "missing-head"/);
   });
 });
@@ -347,9 +355,9 @@ test("Git CLI rejects missing base refs and conflicting modes", () => {
     "same-de-users-formatting",
   ]);
 
-  assert.equal(missingBase.status, 1);
+  assert.equal(missingBase.status, 2);
   assert.match(missingBase.stderr, /requires --changed-from/);
-  assert.equal(conflict.status, 1);
+  assert.equal(conflict.status, 2);
   assert.match(conflict.stderr, /cannot be combined/);
 });
 

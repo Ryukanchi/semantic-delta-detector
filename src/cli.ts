@@ -64,9 +64,14 @@ Options:
   --repo          Git repository path (default: current directory)
   --demo        Show high-impact demo output
   --pr          Show a short simulated PR-style comment; nothing is posted
-  --fail-on     Fail with exit code 1 when result risk is at or above low | medium | high | critical
+  --fail-on     Fail with exit code 1 when result risk is at or above low | medium | high
   --format      json | text (default: text)
   --help        Show this message
+
+Exit codes:
+  0   Success, gate not triggered
+  1   Semantic severity gate triggered
+  2   Operational, configuration, or runtime error
 `);
 }
 
@@ -388,7 +393,7 @@ function main(): void {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown CLI failure.";
     console.error(`Error: ${message}`);
-    process.exit(1);
+    process.exit(2);
   }
 }
 
