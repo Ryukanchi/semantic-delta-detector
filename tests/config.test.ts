@@ -190,6 +190,30 @@ test("CLI --fail-on overrides semantic-delta.yml fail_on", () => {
       tsxBinPath,
       [
         cliPath,
+        "--example",
+        "same-de-users-formatting",
+        "--pr",
+        "--fail-on",
+        "low",
+      ],
+      {
+        cwd: dir,
+        encoding: "utf8",
+      },
+    );
+
+    assert.equal(result.status, 1);
+  });
+});
+
+test("CLI --fail-on rejects critical threshold", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "semantic-delta.yml"), "fail_on: high\n", "utf8");
+
+    const result = spawnSync(
+      tsxBinPath,
+      [
+        cliPath,
         "--before",
         prBeforePath,
         "--after",
@@ -204,8 +228,11 @@ test("CLI --fail-on overrides semantic-delta.yml fail_on", () => {
       },
     );
 
-    assert.equal(result.status, 0);
-    assert.match(result.stdout, /🔴 HIGH RISK/);
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /Invalid --fail-on value "critical"\. Supported values: low, medium, high\./,
+    );
   });
 });
 
@@ -237,7 +264,7 @@ test("CLI example ignores semantic-delta.yml default paths", () => {
   });
 });
 
-test("invalid semantic-delta.yml fail_on reports a clear error", () => {
+test("invalid semantic-delta.yml fail_on reports a clear error with exit code 2", () => {
   withTempDir((dir) => {
     writeFileSync(join(dir, "semantic-delta.yml"), "fail_on: urgent\n", "utf8");
 
@@ -250,10 +277,35 @@ test("invalid semantic-delta.yml fail_on reports a clear error", () => {
       },
     );
 
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
     assert.match(
       result.stderr,
-      /Invalid semantic-delta\.yml fail_on value "urgent". Supported values: low, medium, high, critical\./,
+      /Invalid semantic-delta\.yml fail_on value "urgent"\. Supported values: low, medium, high\./,
     );
   });
+});
+
+test("unknown semantic-delta.yml key fails with exit code 2 and helpful error", () => {
+  const cases = ["failOn: high\n", "fail-on: high\n", "unexpected_key: true\n"];
+
+  for (const content of cases) {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, "semantic-delta.yml"), content, "utf8");
+
+      const result = spawnSync(
+        tsxBinPath,
+        [cliPath, "--before", prBeforePath, "--after", prAfterPath, "--pr"],
+        {
+          cwd: dir,
+          encoding: "utf8",
+        },
+      );
+
+      assert.equal(result.status, 2);
+      assert.match(
+        result.stderr,
+        /Unknown configuration key ".*" in semantic-delta\.yml\. Supported keys: fail_on, default_before_path, default_after_path, include, ignore\./,
+      );
+    });
+  }
 });

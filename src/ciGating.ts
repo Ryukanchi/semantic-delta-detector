@@ -2,6 +2,8 @@ import { SemanticComparisonResult } from "./types.js";
 
 export type SeverityThreshold = "low" | "medium" | "high" | "critical";
 
+export type SupportedFailOnThreshold = "low" | "medium" | "high";
+
 const severityOrder: Record<SeverityThreshold, number> = {
   low: 0,
   medium: 1,
@@ -9,23 +11,34 @@ const severityOrder: Record<SeverityThreshold, number> = {
   critical: 3,
 };
 
-const supportedThresholds = Object.keys(severityOrder) as SeverityThreshold[];
+const supportedFailOnThresholds: SupportedFailOnThreshold[] = [
+  "low",
+  "medium",
+  "high",
+];
 
 export function parseFailOnThreshold(value: string): SeverityThreshold {
   const normalizedValue = value.toLowerCase();
 
-  if (supportedThresholds.includes(normalizedValue as SeverityThreshold)) {
-    return normalizedValue as SeverityThreshold;
+  if (
+    supportedFailOnThresholds.includes(
+      normalizedValue as SupportedFailOnThreshold,
+    )
+  ) {
+    return normalizedValue as SupportedFailOnThreshold;
   }
 
   throw new Error(
-    `Invalid --fail-on value "${value}". Supported values: ${supportedThresholds.join(", ")}.`,
+    `Invalid --fail-on value "${value}". Supported values: ${supportedFailOnThresholds.join(", ")}.`,
   );
 }
 
 export function getResultSeverity(result: SemanticComparisonResult): SeverityThreshold {
   if (result.impact?.severity) {
-    return parseFailOnThreshold(result.impact.severity);
+    const normalized = result.impact.severity.toLowerCase() as SeverityThreshold;
+    if (normalized in severityOrder) {
+      return normalized;
+    }
   }
 
   return result.risk_level;

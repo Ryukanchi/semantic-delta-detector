@@ -433,3 +433,32 @@ test("rejects an invalid rename score before partial accounting or content loadi
   assert.equal(calls.length, 4);
   assert.equal(calls.some((args) => args[2] === "show"), false);
 });
+
+test("unanalyzable file does not abort comparison of remaining valid files", () => {
+  const diff = nameStatusZ([
+    ["M", "models/empty.sql"],
+    ["M", "models/valid.sql"],
+  ]);
+  const contents = [
+    commandResult(0, "-- comment only without analyzable SQL"),
+    commandResult(0, "-- still comment only"),
+    commandResult(0, "SELECT COUNT(DISTINCT user_id) FROM users"),
+    commandResult(0, "SELECT COUNT(*) FROM users"),
+  ];
+
+  const result = compareWithRunner(diff, contents);
+
+  assert.equal(result.summary.discoveredCount, 2);
+  assert.equal(result.summary.analyzedCount, 1);
+  assert.equal(result.summary.skippedCount, 1);
+  assert.equal(result.summary.highestSeverity, "high");
+
+  assert.equal(result.analyzed.length, 1);
+  assert.equal(result.analyzed[0].path, "models/valid.sql");
+  assert.equal(result.analyzed[0].result.risk_level, "high");
+
+  assert.equal(result.skipped.length, 1);
+  assert.equal(result.skipped[0].stage, "analysis");
+  assert.equal(result.skipped[0].path, "models/empty.sql");
+  assert.match(result.skipped[0].reason, /must contain analyzable content/i);
+});

@@ -101,6 +101,8 @@ function getJoinedSignals(query: ParsedSqlQuery): string {
   return findSignal(query).join(" | ");
 }
 
+export const MONETIZATION_TOKEN_PATTERN = /(?<![a-z0-9])(?:mrr|arr)(?![a-z0-9])/i;
+
 function inferDimensionFromText(text: string): BusinessDimension {
   const joined = text.toLowerCase();
 
@@ -112,9 +114,8 @@ function inferDimensionFromText(text: string): BusinessDimension {
       "plan =",
       "paid",
       "is_paid",
-      "mrr",
-      "arr",
     ]) ||
+    containsPattern(joined, MONETIZATION_TOKEN_PATTERN) ||
     containsPattern(joined, /\brevenue\s*>\s*0\b/)
   ) {
     return "monetization";
@@ -159,7 +160,8 @@ function detectSecondaryDimensions(
 
   if (
     primaryDimension !== "monetization" &&
-    (containsAny(joined, ["subscription", "paid", "is_paid", "plan =", "mrr", "arr"]) ||
+    (containsAny(joined, ["subscription", "paid", "is_paid", "plan ="]) ||
+      containsPattern(joined, MONETIZATION_TOKEN_PATTERN) ||
       containsPattern(joined, /\brevenue\s*>\s*0\b/))
   ) {
     dimensions.push("monetization");

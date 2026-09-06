@@ -27,6 +27,7 @@ import {
   estimateBaseSimilarity,
   inferDimensionFromMetadata,
   inferRiskLevel,
+  MONETIZATION_TOKEN_PATTERN,
   normalizeText,
 } from "./semanticHeuristics.js";
 import {
@@ -457,6 +458,75 @@ function compareAggregation(
       aggregationsA,
       aggregationsB,
     ),
+    impact: "high",
+  };
+}
+
+function stripWindowClause(expression: string): string {
+  return expression.replace(/\bover\s*\(.*$/is, "").trim();
+}
+
+function compareRootProjections(
+  queryA: ParsedSqlQuery,
+  queryB: ParsedSqlQuery,
+  sourceRoles?: SourceRoleComparison,
+): DetectedDifference | null {
+  const rootA = getSqlStructure(queryA).root;
+  const rootB = getSqlStructure(queryB).root;
+  const rawSelectionsA = [...rootA.canonicalSelectExpressions].sort();
+  const rawSelectionsB = [...rootB.canonicalSelectExpressions].sort();
+
+  if (rawSelectionsA.join("|") === rawSelectionsB.join("|")) {
+    return null;
+  }
+
+  const aDistinct = rawSelectionsA.some((expr) => /(?:^|\s)distinct\b/i.test(expr));
+  const bDistinct = rawSelectionsB.some((expr) => /(?:^|\s)distinct\b/i.test(expr));
+
+  if (aDistinct !== bDistinct) {
+    return {
+      category: "business_logic_mismatch",
+      description: `The root query changes from ${aDistinct ? "SELECT DISTINCT" : "SELECT"} to ${bDistinct ? "SELECT DISTINCT" : "SELECT"}. This changes whether duplicate result rows are deduplicated and materially changes the output dataset.`,
+      impact: "high",
+    };
+  }
+
+  const groupsA = new Set(rootA.canonicalGroupByExpressions);
+  const groupsB = new Set(rootB.canonicalGroupByExpressions);
+
+  const normalizedSelectionsA = rawSelectionsA
+    .filter((expr) => !groupsA.has(expr))
+    .map(stripWindowClause)
+    .sort();
+  const normalizedSelectionsB = rawSelectionsB
+    .filter((expr) => !groupsB.has(expr))
+    .map(stripWindowClause)
+    .sort();
+
+  if (normalizedSelectionsA.join("|") === normalizedSelectionsB.join("|")) {
+    return null;
+  }
+
+  if (
+    sourceRoles?.safe &&
+    sourceRoles.analysisA.graphSignature === sourceRoles.analysisB.graphSignature &&
+    arraysEqual(
+      normalizedSelectionsA.map(normalizePositionalSourceIdentity),
+      normalizedSelectionsB.map(normalizePositionalSourceIdentity),
+    )
+  ) {
+    return null;
+  }
+
+  const aggregationsA = rootA.aggregations.map((a) => a.canonical).sort();
+  const aggregationsB = rootB.aggregations.map((b) => b.canonical).sort();
+  if (aggregationsA.join("|") !== aggregationsB.join("|")) {
+    return null;
+  }
+
+  return {
+    category: "business_logic_mismatch",
+    description: `The root query changes its selected expressions from ${rawSelectionsA.join(", ") || "none"} to ${rawSelectionsB.join(", ") || "none"}. This changes the values produced by the query.`,
     impact: "high",
   };
 }
@@ -958,7 +1028,7 @@ function compareMonetization(
   profileB: QuerySemanticProfile,
   queryA: ParsedSqlQuery,
   queryB: ParsedSqlQuery,
-): DetectedDifference | null {
+): { difference: DetectedDifference | null; claimedFilter: string | null } {
   const aMonetized =
     profileA.primaryDimension === "monetization" ||
     profileA.secondaryDimensions.includes("monetization");
@@ -967,7 +1037,7 @@ function compareMonetization(
     profileB.secondaryDimensions.includes("monetization");
 
   if (aMonetized === bMonetized) {
-    return null;
+    return { difference: null, claimedFilter: null };
   }
 
   const aSignal = queryA.filters.find(isMonetizationFilter);
@@ -975,29 +1045,43 @@ function compareMonetization(
 
   if (aSignal && !bSignal) {
     return {
-      category: "monetization_mismatch",
-      description: `Query B removes the monetization gate from Query A (${formatFilterList([aSignal])}). The measured population becomes broader: Query A measures monetized ${profileA.entityLabel}, while Query B measures all ${profileB.entityLabel}.`,
-      impact: "high",
+      difference: {
+        category: "monetization_mismatch",
+        description: `Query B removes the monetization gate from Query A (${formatFilterList([aSignal])}). The measured population becomes broader: Query A measures monetized ${profileA.entityLabel}, while Query B measures all ${profileB.entityLabel}.`,
+        impact: "high",
+      },
+      claimedFilter: aSignal,
     };
   }
 
   if (bSignal && !aSignal) {
     return {
-      category: "monetization_mismatch",
-      description: `Query B adds a monetization gate that Query A does not have (${formatFilterList([bSignal])}). The measured population becomes narrower: Query A measures all ${profileA.entityLabel}, while Query B measures monetized ${profileB.entityLabel}.`,
-      impact: "high",
+      difference: {
+        category: "monetization_mismatch",
+        description: `Query B adds a monetization gate that Query A does not have (${formatFilterList([bSignal])}). The measured population becomes narrower: Query A measures all ${profileA.entityLabel}, while Query B measures monetized ${profileB.entityLabel}.`,
+        impact: "high",
+      },
+      claimedFilter: bSignal,
     };
   }
 
   return {
-    category: "monetization_mismatch",
-    description: `Only one query includes a monetization gate. Query A: ${aSignal || "no monetization condition detected"}. Query B: ${bSignal || "no monetization condition detected"}.`,
-    impact: "high",
+    difference: {
+      category: "monetization_mismatch",
+      description: `Only one query includes a monetization gate. Query A: ${aSignal || "no monetization condition detected"}. Query B: ${bSignal || "no monetization condition detected"}.`,
+      impact: "high",
+    },
+    claimedFilter: aSignal ?? bSignal ?? null,
   };
 }
 
 function isMonetizationFilter(filter: string): boolean {
-  return /paid|subscription|mrr|arr|is_paid|revenue\s*>\s*0/i.test(filter);
+  return (
+    /paid|subscription|is_paid/i.test(filter) ||
+    /\bplan\b/i.test(filter) ||
+    MONETIZATION_TOKEN_PATTERN.test(filter) ||
+    /revenue\s*>\s*0/i.test(filter)
+  );
 }
 
 function isRevenueField(field: string | null): boolean {
@@ -1441,6 +1525,7 @@ function compareBusinessLogic(
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
   sourceRoles?: SourceRoleComparison,
+  claimedFilters: ReadonlySet<string> = new Set(),
 ): DetectedDifference | null {
   if (
     sourceRoles?.safe &&
@@ -1456,15 +1541,11 @@ function compareBusinessLogic(
   ) {
     return null;
   }
-  const ignorePatterns = [
-    /paid|subscription|plan|mrr|arr/i,
-    /last_active|event_date|created_at|current_date|current_timestamp|interval/i,
-  ];
   const onlyInA = queryA.filters.filter(
-    (value) => !queryB.filters.includes(value) && !ignorePatterns.some((pattern) => pattern.test(value)),
+    (value) => !queryB.filters.includes(value) && !claimedFilters.has(value),
   );
   const onlyInB = queryB.filters.filter(
-    (value) => !queryA.filters.includes(value) && !ignorePatterns.some((pattern) => pattern.test(value)),
+    (value) => !queryA.filters.includes(value) && !claimedFilters.has(value),
   );
 
   if (onlyInA.length === 0 && onlyInB.length === 0) {
@@ -1861,7 +1942,7 @@ function buildExplanation(
   const metadataContextNote = buildMetadataContextNote(inputA, inputB);
 
   if (differences.length === 0) {
-    return `These definitions are close enough to support the same business interpretation. They use similar logic, time framing, and metric intent. ${evidenceNote}${metadataContextNote}`;
+    return `No material semantic difference was detected within the analyzed dimensions. ${evidenceNote}${metadataContextNote}`;
   }
 
   const sameEntitySpace = profileA.entityLabel === profileB.entityLabel;
@@ -2303,6 +2384,10 @@ export function compareMetricDefinitionsWithAnalysis(
     detectedDifferences,
     compareAggregation(parsedA, parsedB, sourceRoles),
   );
+  pushDifference(
+    detectedDifferences,
+    compareRootProjections(parsedA, parsedB, sourceRoles),
+  );
   detectedDifferences.push(...compareSourceRoleUsages(sourceRoles));
   pushDifference(
     detectedDifferences,
@@ -2326,11 +2411,16 @@ export function compareMetricDefinitionsWithAnalysis(
     compareReportingGrain(parsedA, parsedB, sourceRoles),
   );
   pushDifference(detectedDifferences, compareActivityBasis(profileA, profileB));
-  pushDifference(detectedDifferences, compareMonetization(profileA, profileB, parsedA, parsedB));
+  const monetizationResult = compareMonetization(profileA, profileB, parsedA, parsedB);
+  pushDifference(detectedDifferences, monetizationResult.difference);
   pushDifference(detectedDifferences, compareFilterBooleanLogic(parsedA, parsedB));
+  const claimedFilters = new Set<string>();
+  if (monetizationResult.claimedFilter) {
+    claimedFilters.add(monetizationResult.claimedFilter);
+  }
   pushDifference(
     detectedDifferences,
-    compareBusinessLogic(parsedA, parsedB, profileA, profileB, sourceRoles),
+    compareBusinessLogic(parsedA, parsedB, profileA, profileB, sourceRoles, claimedFilters),
   );
   pushDifference(detectedDifferences, compareDescriptions(normalizedInputA, normalizedInputB));
   pushDifference(detectedDifferences, compareTeamContext(normalizedInputA, normalizedInputB));

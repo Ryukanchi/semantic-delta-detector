@@ -139,7 +139,7 @@ test("package metadata exposes the core runtime and declarations", () => {
     scripts?: Record<string, string>;
   };
 
-  assert.equal(packageJson.version, "1.0.0");
+  assert.equal(packageJson.version, "1.0.1");
 
   assert.deepEqual(packageJson.exports["./core"], {
     types: "./dist/core.d.ts",
@@ -217,4 +217,17 @@ test("package exports block PostgreSQL adapter internals", async () => {
     import("semantic-delta-detector/internal/postgresqlParserWorker"),
     /Package subpath .* is not defined by "exports"/,
   );
+});
+
+test("public API preserves SeverityThreshold source compatibility", () => {
+  type AssertCompatible<T extends rootApi.GitComparisonSummary["highestSeverity"]> = T;
+  const criticalValue: AssertCompatible<"critical"> = "critical";
+  const highValue: AssertCompatible<"high"> = "high";
+  const mediumValue: AssertCompatible<"medium"> = "medium";
+  const lowValue: AssertCompatible<"low"> = "low";
+
+  assert.equal(criticalValue, "critical");
+  assert.equal(highValue, "high");
+  assert.equal(mediumValue, "medium");
+  assert.equal(lowValue, "low");
 });

@@ -46,16 +46,29 @@ export function loadSemanticDeltaConfig(cwd = process.cwd()): SemanticDeltaConfi
       continue;
     }
 
-    const match = line.match(
-      /^(fail_on|default_before_path|default_after_path|include|ignore)\s*:(.*)$/i,
-    );
-    if (!match) {
+    const keyMatch = line.match(/^([a-zA-Z0-9_-]+)\s*:(.*)$/);
+    if (!keyMatch) {
       activeList = null;
       continue;
     }
 
-    const key = match[1].toLowerCase();
-    const value = cleanScalarValue(match[2]);
+    const rawKey = keyMatch[1];
+    const key = rawKey.toLowerCase();
+    const value = cleanScalarValue(keyMatch[2]);
+
+    const supportedKeys = [
+      "fail_on",
+      "default_before_path",
+      "default_after_path",
+      "include",
+      "ignore",
+    ];
+
+    if (!supportedKeys.includes(key)) {
+      throw new Error(
+        `Unknown configuration key "${rawKey}" in semantic-delta.yml. Supported keys: ${supportedKeys.join(", ")}.`,
+      );
+    }
 
     if (key === "include" || key === "ignore") {
       activeList = key;
@@ -76,7 +89,7 @@ export function loadSemanticDeltaConfig(cwd = process.cwd()): SemanticDeltaConfi
         config.failOn = parseFailOnThreshold(value);
       } catch {
         throw new Error(
-          `Invalid semantic-delta.yml fail_on value "${value}". Supported values: low, medium, high, critical.`,
+          `Invalid semantic-delta.yml fail_on value "${value}". Supported values: low, medium, high.`,
         );
       }
     } else if (key === "default_before_path") {

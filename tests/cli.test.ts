@@ -215,7 +215,7 @@ test("cli reports friendly validation errors for malformed json metadata", () =>
   );
 });
 
-test("CLI rejects unknown options with exit code 1", () => {
+test("CLI rejects unknown options with exit code 2", () => {
   const cases = [
     ["--wat"],
     ["--formt", "json"],
@@ -226,16 +226,16 @@ test("CLI rejects unknown options with exit code 1", () => {
   for (const args of cases) {
     const result = runCli(args);
 
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
     assert.equal(result.stdout, "");
     assert.match(result.stderr, new RegExp(`Error: Unknown option: ${args[0]}`));
   }
 });
 
-test("CLI rejects unexpected positional arguments", () => {
+test("CLI rejects unexpected positional arguments with exit code 2", () => {
   const result = runCli(["surprise"]);
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /Error: Unexpected positional argument: surprise/);
 });

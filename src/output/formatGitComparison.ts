@@ -149,6 +149,7 @@ function formatSkippedSummary(result: GitComparisonResult): string {
     "path-filter",
     "pairing",
     "content-load",
+    "analysis",
   ];
   return stages
     .map((stage) => ({

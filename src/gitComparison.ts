@@ -8,7 +8,8 @@ export type GitComparisonSkipStage =
   | "git-parse"
   | "path-filter"
   | "pairing"
-  | "content-load";
+  | "content-load"
+  | "analysis";
 
 export interface GitComparisonSkippedFile {
   stage: GitComparisonSkipStage;
