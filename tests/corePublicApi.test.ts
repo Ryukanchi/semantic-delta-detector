@@ -139,7 +139,7 @@ test("package metadata exposes the core runtime and declarations", () => {
     scripts?: Record<string, string>;
   };
 
-  assert.equal(packageJson.version, "1.0.1");
+  assert.equal(packageJson.version, "1.0.2");
 
   assert.deepEqual(packageJson.exports["./core"], {
     types: "./dist/core.d.ts",
