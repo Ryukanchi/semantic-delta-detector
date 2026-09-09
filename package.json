@@ -1,6 +1,6 @@
 {
   "name": "semantic-delta-detector",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "CLI tool for comparing SQL queries and surfacing semantic differences in business meaning.",
   "type": "module",
   "main": "./dist/index.js",
