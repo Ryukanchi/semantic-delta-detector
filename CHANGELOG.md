@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2 - 2026-09-09
+
+Semantic Delta 1.0.2 is a targeted correctness patch for CLI input precedence.
+
+### Fixes
+
+- **CLI Input Precedence**: Explicit `--query-*`, `--file-*`, and `--json-*`
+  inputs now take precedence over configured default input paths. Invalid or
+  incomplete explicit inputs are no longer silently masked by defaults. Existing
+  `--before` / `--after` fallback behavior and config-based gating are preserved.
+
 ## 1.0.1 - 2026-09-05
 
 Semantic Delta 1.0.1 is a targeted correctness patch addressing comparison precision,
