@@ -182,11 +182,8 @@ function parseArgs(argv: string[]): CliOptions {
 
 type CliMode = "single" | "git";
 
-function resolveCliMode(options: CliOptions): CliMode {
-  const gitRequested = Boolean(
-    options.changedFrom || options.changedTo || options.repositoryPath,
-  );
-  const directPairRequested = Boolean(
+function hasDirectPairInput(options: CliOptions): boolean {
+  return Boolean(
     options.queryA ||
       options.queryB ||
       options.fileA ||
@@ -194,6 +191,13 @@ function resolveCliMode(options: CliOptions): CliMode {
       options.jsonA ||
       options.jsonB,
   );
+}
+
+function resolveCliMode(options: CliOptions): CliMode {
+  const gitRequested = Boolean(
+    options.changedFrom || options.changedTo || options.repositoryPath,
+  );
+  const directPairRequested = hasDirectPairInput(options);
   const beforeAfterRequested = Boolean(options.beforeFile || options.afterFile);
   const nonGitInputRequested = Boolean(
     options.example || directPairRequested || beforeAfterRequested,
@@ -298,7 +302,7 @@ function resolveInputs(
   const beforeFile = options.beforeFile ?? config.defaultBeforePath;
   const afterFile = options.afterFile ?? config.defaultAfterPath;
 
-  if (beforeFile || afterFile) {
+  if (!hasDirectPairInput(options) && (beforeFile || afterFile)) {
     if (!beforeFile || !afterFile) {
       throw new Error("Provide both --before and --after for PR simulation.");
     }
