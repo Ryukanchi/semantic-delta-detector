@@ -879,7 +879,7 @@ function compareJoinType(
 
     const leftToInner = joinA.type === "left" && joinB.type === "inner";
     const exclusionNote = leftToInner
-      ? "LEFT JOIN preserves users without matching orders, while INNER JOIN keeps only users with matching order records. Users without orders may be excluded in Query B."
+      ? `A LEFT JOIN can preserve rows without a match in ${joinA.table}, while an INNER JOIN requires a match. Depending on other predicates, Query B may exclude those rows.`
       : "Changing the join type can change which base-table records are preserved when there is no matching joined row.";
 
     return {

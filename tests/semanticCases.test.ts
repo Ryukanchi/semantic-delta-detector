@@ -383,7 +383,7 @@ test("join type changes are treated as population inclusion risk", () => {
         difference.category === "join_type_mismatch" &&
         difference.impact === "high" &&
         /join type changed from LEFT JOIN to INNER JOIN/i.test(difference.description) &&
-        /users without orders may be excluded in Query B/i.test(difference.description) &&
+        /without a match in orders/i.test(difference.description) &&
         /not be directly comparable/i.test(difference.description),
     ),
   );
@@ -402,6 +402,22 @@ test("join type changes are treated as population inclusion risk", () => {
   assert.match(result.explanation, /join type changes population inclusion/i);
   assert.match(result.recommendation, /join-type change is intentional/i);
   assert.match(result.recommendation, /users without orders should be included/i);
+});
+
+test("LEFT to INNER explanation names the actual joined table", () => {
+  const result = compareSqlQueries(
+    "SELECT SUM(o.total) FROM orders o LEFT JOIN customers c ON o.customer_id = c.id",
+    "SELECT SUM(o.total) FROM orders o INNER JOIN customers c ON o.customer_id = c.id",
+  );
+
+  const finding = result.detected_differences.find(
+    (difference) => difference.category === "join_type_mismatch",
+  );
+  assert.ok(finding);
+  assert.equal(finding.impact, "high");
+  assert.match(finding.description, /without a match in customers/i);
+  assert.doesNotMatch(finding.description, /users|matching orders/i);
+  assert.equal(result.risk_level, "high");
 });
 
 test("distinct user count vs event row count is treated as counted-unit change", () => {
