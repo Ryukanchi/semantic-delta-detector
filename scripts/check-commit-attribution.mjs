@@ -14,7 +14,7 @@ function git(...args) {
 }
 
 const forbidden = [
-  [/^\s*Co-Authored-By:\s*(?:Claude\b|[^\n]*<(?:noreply|claude-code)@anthropic\.com>)/im, 'Claude co-author'],
+  [/^\s*Co-Authored-By:\s*(?:Claude\b|[^\n]*<(?:noreply|claude-code)@anthropic\.com>|[^\n]*<[^>]*@noreply\.anthropic(?:\.com)?>)/im, 'Claude co-author'],
   [/^\s*Claude-Session\s*:/im, 'Claude session trailer'],
   [/^\s*Generated with Claude\b/im, 'Claude generation footer'],
 ];
