@@ -20,7 +20,15 @@ const forbidden = [
 ];
 
 try {
-  const commits = git('rev-list', '--reverse', `${base}..${head}`).trim().split('\n').filter(Boolean);
+  let range = `${base}..${head}`;
+  try {
+    git('cat-file', '-e', `${base}^{commit}`);
+  } catch {
+    // A rewritten branch may no longer contain the push event's previous tip.
+    range = head;
+    console.warn('Previous tip unavailable; checking the full head history.');
+  }
+  const commits = git('rev-list', '--reverse', range).trim().split('\n').filter(Boolean);
   const violations = [];
 
   for (const sha of commits) {
