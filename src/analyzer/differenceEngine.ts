@@ -21,6 +21,7 @@ import {
 import {
   analyzeParserLimitations,
   type ParserConfidenceCap,
+  type UnsupportedSqlConstructKind,
 } from "../parser/unsupportedConstructs.js";
 import {
   buildSemanticProfile,
@@ -1932,6 +1933,7 @@ function buildExplanation(
   differences: DetectedDifference[],
   confidenceLevel: ConfidenceLevel,
   evidenceSources: EvidenceSource[],
+  hasParserLimitations: boolean,
 ): string {
   const evidenceNote =
     evidenceSources.includes("sql_only")
@@ -1942,7 +1944,10 @@ function buildExplanation(
   const metadataContextNote = buildMetadataContextNote(inputA, inputB);
 
   if (differences.length === 0) {
-    return `No material semantic difference was detected within the analyzed dimensions. ${evidenceNote}${metadataContextNote}`;
+    const limitationNote = hasParserLimitations
+      ? " Some SQL constructs were not fully analyzed, so differences in those parts may be unreported."
+      : "";
+    return `No material semantic difference was detected within the analyzed dimensions.${limitationNote} ${evidenceNote}${metadataContextNote}`;
   }
 
   const sameEntitySpace = profileA.entityLabel === profileB.entityLabel;
@@ -2079,6 +2084,7 @@ function buildRecommendation(
   profileA: QuerySemanticProfile,
   profileB: QuerySemanticProfile,
   differences: DetectedDifference[],
+  hasParserLimitations: boolean,
 ): string {
   const categories = new Set(differences.map((difference) => difference.category));
   const removedFilterDifference = differences.find(
@@ -2238,6 +2244,10 @@ function buildRecommendation(
     return "Keep the metrics separately documented and call out the qualification rules directly in dashboards or metric specs.";
   }
 
+  if (hasParserLimitations) {
+    return "Review the SQL constructs listed under analysis limitations manually. They were not fully analyzed, so differences there may be unreported.";
+  }
+
   return "No action required beyond normal review.";
 }
 
@@ -2274,7 +2284,10 @@ function hasJoinChange(differences: DetectedDifference[]): boolean {
   );
 }
 
-function buildDecisionRisk(differences: DetectedDifference[]): string {
+function buildDecisionRisk(
+  differences: DetectedDifference[],
+  hasParserLimitations: boolean,
+): string {
   const risks: string[] = [];
 
   if (hasAggregationMismatch(differences)) {
@@ -2298,10 +2311,16 @@ function buildDecisionRisk(differences: DetectedDifference[]): string {
   }
 
   if (risks.length === 0) {
-    return "No significant business impact detected.";
+    return hasParserLimitations
+      ? "No significant business impact was detected within the analyzed constructs; parts of the SQL were not fully analyzed."
+      : "No significant business impact detected.";
   }
 
   return `Decision risk: ${risks.join("; ")}.`;
+}
+
+function hasParserLimitations(result: SemanticComparisonResult): boolean {
+  return (result.parser_limitations?.length ?? 0) > 0;
 }
 
 function stripTrailingPeriod(text: string): string {
@@ -2315,7 +2334,10 @@ function formatMeaningSummary(text: string): string {
 export function buildImpactLayer(result: SemanticComparisonResult): ImpactLayer {
   return {
     severity: mapRiskToSeverity(result.risk_level),
-    decisionRisk: buildDecisionRisk(result.detected_differences),
+    decisionRisk: buildDecisionRisk(
+      result.detected_differences,
+      hasParserLimitations(result),
+    ),
     affectedMeaning: `Query A: ${formatMeaningSummary(
       result.likely_business_meaning_a,
     )}; Query B: ${formatMeaningSummary(result.likely_business_meaning_b)}.`,
@@ -2337,10 +2359,25 @@ export function buildVerdict(
   }
 
   if (result.detected_differences.length === 0) {
-    return "LOW RISK: No meaningful semantic change detected.";
+    return hasParserLimitations(result)
+      ? "LOW RISK: No modeled semantic differences were detected within the analyzed constructs; parts of the SQL were not fully analyzed."
+      : "LOW RISK: No meaningful semantic change detected.";
   }
 
   return "LOW RISK: This change is unlikely to alter the meaning of the metric.";
+}
+
+// Only the enhanced PostgreSQL syntax summary models set operations and window
+// specifications; the lightweight structure has no syntax summary.
+const SYNTAX_MODELED_CONSTRUCTS: ReadonlySet<UnsupportedSqlConstructKind> = new Set([
+  "set_operation",
+  "window_specification",
+]);
+
+function getSyntaxModeledConstructs(
+  structure: SqlStructureSummary,
+): ReadonlySet<UnsupportedSqlConstructKind> | undefined {
+  return structure.syntax ? SYNTAX_MODELED_CONSTRUCTS : undefined;
 }
 
 export interface SqlComparisonAnalysisOverrides {
@@ -2442,6 +2479,10 @@ export function compareMetricDefinitionsWithAnalysis(
   const parserAnalysis = analyzeParserLimitations(
     normalizedInputA.query,
     normalizedInputB.query,
+    {
+      modeledConstructsA: getSyntaxModeledConstructs(getSqlStructure(parsedA)),
+      modeledConstructsB: getSyntaxModeledConstructs(getSqlStructure(parsedB)),
+    },
   );
   const confidenceLevel = applyParserConfidenceCap(
     inferConfidenceLevel(evidenceSources, detectedDifferences),
@@ -2476,12 +2517,14 @@ export function compareMetricDefinitionsWithAnalysis(
       detectedDifferences,
       confidenceLevel,
       evidenceSources,
+      parserLimitations.length > 0,
     ),
     recommendation: buildRecommendation(
       semanticSimilarityScore,
       profileA,
       profileB,
       detectedDifferences,
+      parserLimitations.length > 0,
     ),
     ...(parserLimitations.length > 0 ? { parser_limitations: parserLimitations } : {}),
   };

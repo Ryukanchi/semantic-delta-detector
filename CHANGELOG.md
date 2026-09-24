@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.4 - 2026-09-24
+
+Semantic Delta 1.0.4 is a targeted analysis-honesty patch for the lightweight
+analyzer used by the root and `/core` entrypoints.
+
+### Fixes
+
+- **Visible Analysis Limits**: Set operations (`UNION`, `INTERSECT`, `EXCEPT`),
+  window specifications (`OVER (...)`, `WINDOW`), `HAVING`, `DISTINCT ON`, row
+  limits (`LIMIT`, `OFFSET`, `FETCH FIRST/NEXT`, `TOP`) and `ORDER BY` are now
+  reported as parser limitations instead of silently looking fully analyzed.
+  Their confidence cap is low, except `ORDER BY`, which is capped at medium. No
+  findings are inferred from their presence, and risk is unchanged. The
+  `/postgresql` entrypoint still models set operations and window
+  specifications when its syntax parser succeeds.
+- **CTE Detection With Leading Comments**: A `WITH` query preceded by a line or
+  block comment now receives the same CTE limitation and confidence cap.
+  Construct detection ignores keywords inside comments and quoted text.
+- **Limited No-Findings Wording**: When no differences were found but parser
+  limitations exist, the verdict, impact, explanation and recommendation state
+  that only the analyzed constructs were covered.
+
 ## 1.0.3 - 2026-09-23
 
 Semantic Delta 1.0.3 is a targeted correctness patch for join type difference explanations.

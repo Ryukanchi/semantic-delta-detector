@@ -173,10 +173,15 @@ test("unsupported PostgreSQL window shapes keep fallback uncertainty visible", (
 
   assert.equal(result.risk_level, "low");
   assert.equal(result.confidence_level, "low");
-  assert.equal(result.parser_limitations?.length, 2);
-  assert.match(
-    result.parser_limitations?.[0] ?? "",
-    /enhanced PostgreSQL syntax parser/i,
+  const limitations = result.parser_limitations ?? [];
+  assert.equal(
+    limitations.filter((note) => /enhanced PostgreSQL syntax parser/i.test(note)).length,
+    2,
+  );
+  // The lightweight fallback does not model window specifications either.
+  assert.equal(
+    limitations.filter((note) => /OVER \(\.\.\.\) window specification/.test(note)).length,
+    2,
   );
 });
 
