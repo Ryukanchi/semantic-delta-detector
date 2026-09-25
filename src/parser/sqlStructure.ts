@@ -171,7 +171,7 @@ const structureCache = new WeakMap<ParsedSqlQuery, SqlStructureSummary>();
 export function stripSqlComments(input: string): string {
   let result = "";
   let index = 0;
-  let state: "normal" | "line-comment" | "block-comment" | "single-quote" | "double-quote" =
+  let state: "normal" | "line-comment" | "block-comment" | "jinja-comment" | "single-quote" | "double-quote" =
     "normal";
 
   while (index < input.length) {
@@ -187,6 +187,15 @@ export function stripSqlComments(input: string): string {
     }
     if (state === "block-comment") {
       if (current === "*" && next === "/") {
+        state = "normal";
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (state === "jinja-comment") {
+      if (current === "#" && next === "}") {
         state = "normal";
         index += 2;
       } else {
@@ -226,6 +235,12 @@ export function stripSqlComments(input: string): string {
     if (current === "/" && next === "*") {
       result = result.slice(0, -1);
       state = "block-comment";
+      index += 2;
+      continue;
+    }
+    if (current === "{" && next === "#") {
+      result = result.slice(0, -1) + " ";
+      state = "jinja-comment";
       index += 2;
       continue;
     }

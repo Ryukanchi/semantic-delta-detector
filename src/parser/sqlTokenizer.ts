@@ -3,15 +3,10 @@ import {
   analyzeSqlStructure,
   cacheSqlStructure,
   canonicalizeSqlExpression,
-  stripSqlComments,
   type SqlStructureSummary,
 } from "./sqlStructure.js";
 
 const AGGREGATION_PATTERNS = ["count", "sum", "avg", "min", "max"];
-
-export function hasAnalyzableSqlContent(rawQuery: string): boolean {
-  return stripSqlComments(rawQuery).replace(/;/g, "").trim().length > 0;
-}
 
 function normalizeWhitespace(input: string): string {
   return input.replace(/\s+/g, " ").trim();

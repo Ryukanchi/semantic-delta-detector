@@ -32,7 +32,7 @@ export interface GitComparisonSummary {
   discoveredCount: number;
   analyzedCount: number;
   skippedCount: number;
-  highestSeverity: SeverityThreshold;
+  highestSeverity: SeverityThreshold | null;
 }
 
 export interface GitComparisonResult {

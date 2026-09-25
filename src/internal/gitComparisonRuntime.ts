@@ -47,6 +47,22 @@ function formatContentFailures(failures: GitContentLoadFailure[]): string {
     .join("; ");
 }
 
+function formatAnalysisSkipReason(error: unknown): string {
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "SEMANTIC_DELTA_UNANALYZABLE_SQL"
+  ) {
+    const input = error as { query?: unknown; reason?: unknown; message?: unknown };
+    const query = input.query === "A" || input.query === "B" ? `Query ${input.query}` : "SQL input";
+    const reason = typeof input.reason === "string" ? ` (${input.reason})` : "";
+    return `analysis unavailable for ${query}${reason}: ${typeof input.message === "string" ? input.message : "Semantic Delta could not recognize enough supported query structure."}`;
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function compareGitChangesWithRunner(
   options: CompareGitChangesOptions,
   runner: GitCommandRunner,
@@ -117,7 +133,7 @@ export function compareGitChangesWithRunner(
         path: pair.afterPath,
         beforePath: pair.beforePath,
         afterPath: pair.afterPath,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: formatAnalysisSkipReason(error),
       });
     }
   }
@@ -130,9 +146,9 @@ export function compareGitChangesWithRunner(
     );
   }
 
-  const highestSeverity = getHighestSeverity(
-    analyzed.map((file) => getResultSeverity(file.result)),
-  );
+  const highestSeverity = analyzed.length > 0
+    ? getHighestSeverity(analyzed.map((file) => getResultSeverity(file.result)))
+    : null;
 
   return {
     repositoryPath: discovery.repositoryPath,

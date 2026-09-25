@@ -296,7 +296,8 @@ test("Git CLI does not fail semantic gating when no file is comparable", () => {
     ]);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^🟢 LOW RISK — 0 analyzed, 1 skipped/);
+    assert.match(result.stdout, /^No semantic assessment available — 0 analyzed, 1 skipped/);
+    assert.doesNotMatch(result.stdout, /LOW RISK/);
     assert.match(result.stdout, /No comparable files were analyzed/);
   }, "only-added");
 });

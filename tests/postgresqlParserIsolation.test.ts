@@ -84,8 +84,8 @@ test("the isolated API parses PostgreSQL successfully without changing semantic 
 
 test("vendor parse failures stay visible through the isolated API", async () => {
   const result = await compareSqlQueriesIsolated(
-    "SELECT FROM WHERE;",
-    "SELECT FROM WHERE;",
+    "SELECT id FROM users FOR UPDATE;",
+    "SELECT id FROM users FOR UPDATE;",
   );
 
   assert.equal(result.confidence_level, "low");
@@ -118,11 +118,11 @@ test("a real wall-clock timeout terminates the worker before returning", async (
 test("timeout fallback preserves semantic risk and caps confidence", async () => {
   const result = await comparePostgresqlMetricDefinitionsIsolated(
     {
-      query: "DELETE FROM users;",
+      query: "SELECT id FROM users;",
       description: "User population",
     },
     {
-      query: "DELETE FROM payments;",
+      query: "SELECT id FROM payments;",
       description: "Payment population",
     },
     { timeoutMs: 25 },
