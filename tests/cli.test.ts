@@ -273,3 +273,17 @@ test("CLI continues to consume values for valid nearby options", () => {
   assert.equal(gitResult.status, 0, gitResult.stderr);
   assert.equal(JSON.parse(gitResult.stdout).summary.discoveredCount, 0);
 });
+
+test("CLI reports unanalyzable SQL as input unavailable even with a low risk gate", () => {
+  const result = runCli([
+    "--query-a", "SELECT id FROM users",
+    "--query-b", "hello world",
+    "--fail-on", "low",
+    "--pr",
+  ]);
+
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Query B/i);
+  assert.doesNotMatch(result.stderr, /Invalid SQL|LOW RISK|Similarity:/i);
+});

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.0 - 2026-09-25
+
+Semantic Delta now requires enough evidence of a single supported SELECT query
+before producing a semantic assessment. Empty or structurally unsupported SQL,
+multiple statements, and statements outside the SELECT scope raise a typed
+`SEMANTIC_DELTA_UNANALYZABLE_SQL` input error with query side and reason. This
+does not assert whether the SQL is valid in a database. The same check precedes
+the optional PostgreSQL parser and isolated Worker. A vendor-parser rejection
+alone still yields the lightweight fallback with an analysis limitation.
+Jinja comments in model headers no longer supply false SELECT evidence to the
+lightweight structure parser.
+
+Git comparisons continue to skip unanalyzable files without changing the
+existing semantic gate policy. Runs with zero analyzed files now report no
+semantic assessment instead of LOW risk.
+
 ## 1.0.4 - 2026-09-24
 
 Semantic Delta 1.0.4 is a targeted analysis-honesty patch for the lightweight

@@ -1,5 +1,6 @@
 import {
   compareMetricDefinitionsWithAnalysis,
+  requireAnalyzableSqlInput,
 } from "../analyzer/differenceEngine.js";
 import { analyzeSourceRoles } from "../analyzer/sourceRoleCanonicalization.js";
 import { nodeSqlPostgresqlParser } from "../parser/nodeSqlParserAdapter.js";
@@ -88,6 +89,8 @@ export function comparePostgresqlMetricDefinitions(
   inputA: MetricDefinitionInput,
   inputB: MetricDefinitionInput,
 ): SemanticComparisonResult {
+  requireAnalyzableSqlInput(inputA, "A");
+  requireAnalyzableSqlInput(inputB, "B");
   const enhancedA = analyzePostgresqlStructure(inputA.query, "A");
   const enhancedB = analyzePostgresqlStructure(inputB.query, "B");
   return compareEnhancedStructures(inputA, inputB, enhancedA, enhancedB);
@@ -106,6 +109,8 @@ export async function comparePostgresqlMetricDefinitionsIsolated(
   options: IsolatedPostgresqlComparisonOptions = {},
   isolationHarness?: PostgresqlParserIsolationHarness,
 ): Promise<SemanticComparisonResult> {
+  requireAnalyzableSqlInput(inputA, "A");
+  requireAnalyzableSqlInput(inputB, "B");
   const fallbackA = analyzeSqlStructure(inputA.query);
   const fallbackB = analyzeSqlStructure(inputB.query);
   const isolatedResult = await runIsolatedPostgresqlParser(

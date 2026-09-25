@@ -135,7 +135,7 @@ test("self-join source identity is role-based instead of FROM-position-based", (
 });
 
 test("external parser failures retain fallback output and expose uncertainty", () => {
-  const result = compareSqlQueries("SELECT FROM WHERE;", "SELECT FROM WHERE;");
+  const result = compareSqlQueries("SELECT id FROM users FOR UPDATE;", "SELECT id FROM users FOR UPDATE;");
 
   assert.equal(result.confidence_level, "low");
   assert.equal(result.parser_limitations?.length, 2);
@@ -146,12 +146,12 @@ test("external parser failures retain fallback output and expose uncertainty", (
 test("external parser failure caps confidence without lowering semantic risk", () => {
   const result = compareMetricDefinitions(
     {
-      query: "DELETE FROM users;",
+      query: "SELECT id FROM users FOR UPDATE;",
       description: "User population",
       team_context: "Growth",
     },
     {
-      query: "DELETE FROM payments;",
+      query: "SELECT id FROM payments FOR UPDATE;",
       description: "Payment population",
       team_context: "Finance",
     },

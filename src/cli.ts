@@ -366,7 +366,7 @@ function main(): void {
 
       if (
         failOn &&
-        result.summary.analyzedCount > 0 &&
+        result.summary.highestSeverity !== null &&
         shouldFailForRisk(result.summary.highestSeverity, failOn)
       ) {
         process.exitCode = 1;

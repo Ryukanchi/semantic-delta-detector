@@ -77,7 +77,7 @@ export function formatGitComparisonReport(result: GitComparisonResult): string {
     "",
     "## Summary",
     "",
-    `- Highest risk: ${formatSeverity(result.summary.highestSeverity)}`,
+    `- Highest risk: ${result.summary.highestSeverity === null ? "Not assessed" : formatSeverity(result.summary.highestSeverity)}`,
     `- Changed files discovered: ${result.summary.discoveredCount}`,
     `- Files analyzed: ${result.summary.analyzedCount}`,
     `- Files skipped: ${result.summary.skippedCount}`,
@@ -167,7 +167,9 @@ export function formatGitComparisonPrComment(result: GitComparisonResult): strin
   const shownFindings = orderedFindings.slice(0, 5);
   const shownSkipped = result.skipped.slice(0, 5);
   const lines = [
-    `${severityEmoji(severity)} ${formatSeverity(severity)} RISK — ${result.summary.analyzedCount} analyzed, ${result.summary.skippedCount} skipped`,
+    severity === null
+      ? `No semantic assessment available — ${result.summary.analyzedCount} analyzed, ${result.summary.skippedCount} skipped`
+      : `${severityEmoji(severity)} ${formatSeverity(severity)} RISK — ${result.summary.analyzedCount} analyzed, ${result.summary.skippedCount} skipped`,
     result.analyzed.length === 0
       ? result.summary.discoveredCount === 0
         ? "No changed files were discovered between these refs."

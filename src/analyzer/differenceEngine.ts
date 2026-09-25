@@ -1,7 +1,8 @@
+import { tokenizeSql } from "../parser/sqlTokenizer.js";
 import {
-  hasAnalyzableSqlContent,
-  tokenizeSql,
-} from "../parser/sqlTokenizer.js";
+  assessSqlAnalyzability,
+  UnanalyzableSqlInputError,
+} from "./sqlAnalyzability.js";
 import {
   getDirectBaseTables,
   getReachableNestedScopes,
@@ -70,13 +71,12 @@ function normalizeMetricInput(input: MetricDefinitionInput): MetricDefinitionInp
   };
 }
 
-function requireAnalyzableSqlInput(
+export function requireAnalyzableSqlInput(
   input: MetricDefinitionInput,
   queryLabel: "A" | "B",
 ): void {
-  if (!hasAnalyzableSqlContent(input.query)) {
-    throw new Error(`Query ${queryLabel} SQL input must contain analyzable content.`);
-  }
+  const assessment = assessSqlAnalyzability(input.query);
+  if (!assessment.ok) throw new UnanalyzableSqlInputError(queryLabel, assessment);
 }
 
 function getDisplayMetricName(

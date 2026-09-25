@@ -124,11 +124,13 @@ npx semantic-delta-detector \
 ```
 
 Supported thresholds are `low`, `medium`, and `high`. The gate uses the highest severity among analyzed files. Skipped files do not trigger semantic failure, and a run with no comparable files exits calmly unless an operational error occurred.
+When no files are analyzed, the summary reports no highest risk and the PR
+preview says no semantic assessment is available.
 
 Operational errors remain distinct from semantic gate failures:
 - Exit `0`: Successful comparison run, gate not triggered
 - Exit `1`: Semantic severity gate triggered (risk at or above `--fail-on` threshold)
-- Exit `2`: Operational, configuration, or runtime error
+- Exit `2`: Input without enough analysis evidence, or an operational, configuration, or runtime error
 
 ## Repository configuration
 
@@ -215,7 +217,7 @@ reported as silent equivalence.
 
 Trustworthiness guardrails keep uncertainty explicit:
 
-- empty, whitespace-only, and comment-only SQL inputs are rejected instead of being reported as low risk;
+- empty, whitespace-only, comment-only, structurally unsupported, non-SELECT, and multi-statement SQL inputs raise a typed `SEMANTIC_DELTA_UNANALYZABLE_SQL` error instead of being reported as low risk; its `query` and `reason` identify the affected side and boundary;
 - partially modeled CTE and CASE constructs cap confidence at `medium`, while detected subqueries cap it at `low`;
 - parser limitations reduce confidence without automatically increasing semantic risk;
 - unknown CLI options and unsupported positional arguments fail with an error instead of being ignored.

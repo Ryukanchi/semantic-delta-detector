@@ -182,7 +182,7 @@ test("returns a calm empty result when refs contain no changed files", () => {
     discoveredCount: 0,
     analyzedCount: 0,
     skippedCount: 0,
-    highestSeverity: "low",
+    highestSeverity: null,
   });
   assert.deepEqual(result.analyzed, []);
   assert.deepEqual(result.skipped, []);
@@ -197,7 +197,7 @@ test("treats only added and deleted files as transparent nonfatal skips", () => 
     discoveredCount: 2,
     analyzedCount: 0,
     skippedCount: 2,
-    highestSeverity: "low",
+    highestSeverity: null,
   });
   assert.deepEqual(
     result.skipped.map((item) => item.path),
@@ -324,7 +324,7 @@ test("accounts for invalid UTF-8 without invoking Git content loading", () => {
     discoveredCount: 1,
     analyzedCount: 0,
     skippedCount: 1,
-    highestSeverity: "low",
+    highestSeverity: null,
   });
   assert.equal(result.skipped[0].stage, "git-parse");
   assert.match(result.skipped[0].line ?? "", /0xc328/);
@@ -461,4 +461,19 @@ test("unanalyzable file does not abort comparison of remaining valid files", () 
   assert.equal(result.skipped[0].stage, "analysis");
   assert.equal(result.skipped[0].path, "models/empty.sql");
   assert.match(result.skipped[0].reason, /must contain analyzable content/i);
+});
+
+test("Git comparison skips unsupported SQL with an explicit unavailable reason", () => {
+  const result = compareWithRunner(
+    nameStatusZ([["M", "models/gibberish.sql"]]),
+    [
+      commandResult(0, "SELECT id FROM users"),
+      commandResult(0, "hello world"),
+    ],
+  );
+
+  assert.equal(result.summary.analyzedCount, 0);
+  assert.equal(result.summary.highestSeverity, null);
+  assert.equal(result.skipped[0].stage, "analysis");
+  assert.match(result.skipped[0].reason, /analysis unavailable for Query B \(not_a_select_query\)/);
 });

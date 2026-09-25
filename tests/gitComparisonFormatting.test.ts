@@ -123,7 +123,7 @@ test("formats a calm report when no files are comparable", () => {
       discoveredCount: 1,
       analyzedCount: 0,
       skippedCount: 1,
-      highestSeverity: "low",
+      highestSeverity: null,
     },
   };
 
@@ -131,7 +131,9 @@ test("formats a calm report when no files are comparable", () => {
   const comment = formatGitComparisonPrComment(result);
 
   assert.match(report, /No comparable files were analyzed\. No semantic gate was applied\./);
-  assert.match(comment, /^🟢 LOW RISK — 0 analyzed, 1 skipped/);
+  assert.match(report, /- Highest risk: Not assessed/);
+  assert.match(comment, /^No semantic assessment available — 0 analyzed, 1 skipped/);
+  assert.doesNotMatch(comment, /LOW RISK/);
   assert.match(comment, /No comparable files were analyzed/);
   assert.doesNotMatch(comment, /alters the meaning/i);
 });
@@ -150,12 +152,13 @@ test("distinguishes no changed files from non-comparable changed files", () => {
       discoveredCount: 0,
       analyzedCount: 0,
       skippedCount: 0,
-      highestSeverity: "low",
+      highestSeverity: null,
     },
   };
 
   const comment = formatGitComparisonPrComment(result);
 
   assert.match(comment, /No changed files were discovered between these refs\./);
+  assert.doesNotMatch(comment, /LOW RISK/);
   assert.doesNotMatch(comment, /Skipped changes are listed below/);
 });
